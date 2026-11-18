@@ -20,7 +20,30 @@ export interface Tool {
   def: ToolDef;
   /** Risky tools need approval under the "ask" policy and are removed under "readonly". */
   risky?: boolean;
-  run: (args: any, ctx: ToolCtx) => Promise<string>;
+  run: (args: any, ctx: ToolCtx) => Promise<string | ToolOutput>;
+}
+/** Tool output with images: workspace-relative paths of image files the model should see. */
+export interface ToolOutput {
+  text: string;
+  images?: string[];
+}
+
+export const IMAGE_TYPES: Record<string, string> = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+export const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // the Anthropic API's per-image limit; the strictest common one
+
+/** Save base64 images (from an MCP server) into the workspace so they persist like screenshots. */
+async function saveImages(ws: string, dir: string, images: { mediaType: string; data: string }[]) {
+  const out: string[] = [];
+  for (const [i, img] of images.entries()) {
+    const ext = Object.entries(IMAGE_TYPES).find(([, t]) => t === img.mediaType)?.[0];
+    if (!ext) continue;
+    const rel = `${dir}/img-${Date.now()}-${i}${ext}`;
+    const file = inWs(ws, rel);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, Buffer.from(img.data, 'base64'));
+    out.push(rel);
+  }
+  return out;
 }
 
 const MAX_OUT = 16000;
@@ -145,10 +168,19 @@ const fileTools: Tool[] = [
   {
     def: {
       name: 'read_file',
-      description: 'Read a text file from your workspace.',
+      description: 'Read a file from your workspace. Text files return their content; images (PNG, JPEG, GIF, WebP) are shown to you so you can look at charts, screenshots and designs.',
       parameters: obj({ path: str('Path relative to the workspace.') }, ['path']),
     },
-    run: async (a, ctx) => clip(await fs.readFile(inWs(ctx.ws, a.path), 'utf8'), 60000),
+    run: async (a, ctx): Promise<string | ToolOutput> => {
+      const file = inWs(ctx.ws, a.path);
+      if (IMAGE_TYPES[path.extname(file).toLowerCase()]) {
+        const { size } = await fs.stat(file);
+        if (size > MAX_IMAGE_BYTES)
+          throw new Error(`Image is ${(size / 1048576).toFixed(1)} MB; the limit is 5 MB. Make a smaller copy first (e.g. with ImageMagick or Pillow).`);
+        return { text: `Image ${a.path} (${Math.round(size / 1024)} KB):`, images: [a.path] };
+      }
+      return clip(await fs.readFile(file, 'utf8'), 60000);
+    },
   },
   {
     def: {
@@ -269,7 +301,7 @@ const browser: Tool = {
   def: {
     name: 'browser',
     description:
-      'Drive your own headless browser for pages that need JavaScript or interaction. Actions: goto (url), text (read the visible page text), click (selector), type (selector, text, optional submit), screenshot (saved into your workspace).',
+      'Drive your own headless browser for pages that need JavaScript or interaction. Actions: goto (url), text (read the visible page text), click (selector), type (selector, text, optional submit), screenshot (saved into your workspace and shown to you).',
     parameters: obj(
       {
         action: { type: 'string', enum: ['goto', 'text', 'click', 'type', 'screenshot'] },
@@ -306,7 +338,7 @@ const browser: Tool = {
         const file = inWs(ctx.ws, rel);
         await fs.mkdir(path.dirname(file), { recursive: true });
         await page.screenshot({ path: file });
-        return `Saved screenshot to ${rel}`;
+        return { text: `Saved screenshot to ${rel}`, images: [rel] };
       }
       default:
         throw new Error(`Unknown browser action: ${a.action}`);
@@ -344,7 +376,11 @@ export function toolsFor(bot: Bot, depth: number): Tool[] {
               description: mt.description || mt.name,
               parameters: mt.inputSchema || obj({}),
             },
-            run: (args) => c.call(mt.name, args),
+            run: async (args, ctx): Promise<ToolOutput> => {
+              const r = await c.call(mt.name, args);
+              const images = await saveImages(ctx.ws, 'mcp-images', r.images);
+              return { text: clip(r.text) + (images.length ? `\n[images saved: ${images.join(', ')}]` : ''), images };
+            },
           });
   return bot.policy === 'readonly' ? t.filter((x) => !x.risky) : t;
 }

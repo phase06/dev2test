@@ -153,7 +153,9 @@ test('workspace file API cannot escape the workspace', async () => {
   assert.equal(r.status, 400);
 });
 
-test('Anthropic-format provider: streaming text + tool use round trip', async () => {
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+
+test('Anthropic-format provider: tool round trip, cache breakpoints, usage and images', async () => {
   const http = await import('node:http');
   const seen = [];
   const srv = http.createServer((req, res) => {
@@ -164,17 +166,22 @@ test('Anthropic-format provider: streaming text + tool use round trip', async ()
       seen.push({ url: req.url, key: req.headers['x-api-key'], body });
       const ev = (o) => res.write(`event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`);
       res.writeHead(200, { 'content-type': 'text/event-stream' });
+      ev({ type: 'message_start', message: { usage: { input_tokens: 50, cache_read_input_tokens: 900, cache_creation_input_tokens: 30, output_tokens: 1 } } });
       const last = body.messages.at(-1).content.at(-1);
+      const ask = body.messages.findLast((m) => m.content.some((c) => c.type === 'text' && !c.text.startsWith('['))).content.find((c) => c.type === 'text').text;
       if (last.type === 'tool_result') {
+        const kinds = last.content.map((c) => c.type).join('+');
         ev({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
-        ev({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: `Listed: ${last.content.slice(0, 20)}` } });
+        ev({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: `Got ${kinds}: ${last.content[0].text.slice(0, 20)}` } });
       } else {
+        const [name, input] = ask.includes('chart') ? ['read_file', '{"path":"chart.png"}'] : ['list_dir', '{"path":"."}'];
         ev({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } });
         ev({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Checking.' } });
-        ev({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_1', name: 'list_dir', input: {} } });
-        ev({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"path"' } });
-        ev({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: ':"."}' } });
+        ev({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_1', name, input: {} } });
+        ev({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: input.slice(0, 7) } });
+        ev({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: input.slice(7) } });
       }
+      ev({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 20 } });
       ev({ type: 'message_stop' });
       res.end();
     });
@@ -185,18 +192,43 @@ test('Anthropic-format provider: streaming text + tool use round trip', async ()
   const bot = await api('POST', '/api/bots', { name: 'Cleo', providerId: 'ant', model: 'm', policy: 'auto', isolation: 'host' });
   const t = await api('POST', '/api/threads', { members: [bot.id] });
   const [reply] = await say(t.id, 'what files do you have?');
-  srv.close();
   assert.equal(reply.status, 'done', reply.error);
   assert.deepEqual(reply.parts.map((p) => p.type), ['text', 'tool', 'text']);
-  assert.match(text(reply), /Listed: /);
+  assert.match(text(reply), /Got text: /);
   assert.equal(seen[0].url, '/v1/messages');
   assert.equal(seen[0].key, 'k-ant');
-  assert.ok(seen[0].body.system.includes('You are Cleo'));
   // Second request must replay tool_use then tool_result in Anthropic's shape.
   const m2 = seen[1].body.messages;
   assert.equal(m2.at(-2).content.at(-1).type, 'tool_use');
   assert.deepEqual(m2.at(-2).content.at(-1).input, { path: '.' });
   assert.equal(m2.at(-1).content[0].tool_use_id, 'toolu_1');
+
+  // Prompt caching: two system blocks, both marked, plus the last block of the conversation.
+  for (const { body } of seen) {
+    assert.equal(body.system.length, 2);
+    assert.match(body.system[0].text, /You are Cleo/);
+    assert.deepEqual(body.system.map((b) => b.cache_control), [{ type: 'ephemeral' }, { type: 'ephemeral' }]);
+    assert.deepEqual(body.messages.at(-1).content.at(-1).cache_control, { type: 'ephemeral' });
+    assert.ok(JSON.stringify(body).split('cache_control').length - 1 <= 4, 'at most 4 breakpoints');
+  }
+  // Every step of a run sends a byte-identical prefix: same tools, same system blocks.
+  assert.equal(JSON.stringify(seen[0].body.system), JSON.stringify(seen[1].body.system));
+  assert.equal(JSON.stringify(seen[0].body.tools), JSON.stringify(seen[1].body.tools));
+  assert.doesNotMatch(JSON.stringify(seen[0].body.system), /\d\d:\d\d:\d\d/, 'no clock time in the system prompt');
+
+  // Usage is summed over the run's two model calls.
+  assert.deepEqual(reply.usage, { input: 100, output: 40, cacheRead: 1800, cacheWrite: 60, calls: 2 });
+
+  // Images: read_file on a PNG puts an image block inside the tool_result.
+  fs.writeFileSync(path.join(home, 'workspaces', bot.id, 'chart.png'), PNG);
+  seen.length = 0;
+  const [img] = await say(t.id, 'look at the chart please');
+  srv.close();
+  assert.equal(img.status, 'done', img.error);
+  assert.match(text(img), /Got text\+image: Image chart\.png/);
+  const result = seen[1].body.messages.at(-1).content.find((c) => c.type === 'tool_result');
+  assert.deepEqual(result.content[1].source, { type: 'base64', media_type: 'image/png', data: PNG.toString('base64') });
+  assert.deepEqual(img.parts.find((p) => p.type === 'tool').images, ['chart.png']);
 });
 
 test('MCP connector tools are exposed to bots', async () => {
@@ -239,9 +271,9 @@ test('long threads are summarised; the summary replaces old messages in the prom
   const t = await api('POST', '/api/threads', { members: [ada.id] });
   for (let i = 0; i < 6; i++) await say(t.id, `hello number ${i} ` + 'x'.repeat(100));
   assert.equal((await api('GET', '/api/threads')).find((x) => x.id === t.id).summary, undefined);
-  await api('PUT', '/api/config', { compactChars: 600 });
+  await api('PUT', '/api/config', { contextTokens: 150 });
   const [reply] = await say(t.id, 'what do you recall?');
-  await api('PUT', '/api/config', { compactChars: 120000 });
+  await api('PUT', '/api/config', { contextTokens: 32000 });
   const { summary } = (await api('GET', '/api/threads')).find((x) => x.id === t.id);
   assert.match(summary.text, /prefers teal/);
   assert.ok(summary.count >= 4 && summary.count < 13, `count ${summary.count}`);
@@ -322,4 +354,74 @@ test('an isolated bot fails closed when no container engine is available', async
     await exited;
     fs.rmSync(home2, { recursive: true, force: true });
   }
+});
+
+test('OpenAI format: images follow the tool results, usage is read, and later runs drop the image', async () => {
+  const bot = await api('POST', '/api/bots', { name: 'Iris', providerId: 'mock', model: 'mock-large', policy: 'auto', isolation: 'host' });
+  fs.writeFileSync(path.join(home, 'workspaces', bot.id, 'chart.png'), PNG);
+  const t = await api('POST', '/api/threads', { members: [bot.id] });
+  mock.requests.length = 0;
+  const [reply] = await say(t.id, 'look at chart.png');
+  assert.equal(reply.status, 'done', reply.error);
+  assert.equal(text(reply), 'I can see 1 image(s).');
+  const req = mock.requests[1];
+  const i = req.messages.findIndex((m) => m.role === 'tool');
+  assert.equal(req.messages[i + 1].role, 'user');
+  assert.equal(req.messages[i + 1].content[1].image_url.url, `data:image/png;base64,${PNG.toString('base64')}`);
+  assert.equal(req.messages.filter((m) => m.role === 'system').length, 1, 'system blocks are joined');
+  assert.deepEqual(req.stream_options, { include_usage: true });
+  assert.deepEqual(reply.usage, { input: 80, output: 14, cacheRead: 120, cacheWrite: 0, calls: 2 });
+
+  await say(t.id, 'hi');
+  const later = JSON.stringify(mock.requests.at(-1));
+  assert.doesNotMatch(later, /image_url/);
+  assert.match(later, /image not shown: chart\.png/);
+});
+
+test('a model that rejects images gets the request again without them', async () => {
+  const bot = await api('POST', '/api/bots', { name: 'Bly', providerId: 'mock', model: 'blind', policy: 'auto', isolation: 'host' });
+  fs.writeFileSync(path.join(home, 'workspaces', bot.id, 'chart.png'), PNG);
+  const t = await api('POST', '/api/threads', { members: [bot.id] });
+  mock.requests.length = 0;
+  const [reply] = await say(t.id, 'look at chart.png');
+  assert.equal(reply.status, 'done', reply.error);
+  assert.match(text(reply), /Done\. Result/);
+  assert.match(JSON.stringify(mock.requests.at(-1)), /image omitted: this model does not accept images/);
+  // Remembered: the next run does not try images first.
+  const before = mock.requests.length;
+  await say(t.id, 'look at chart.png');
+  assert.equal(mock.requests.slice(before).filter((r) => JSON.stringify(r).includes('image_url')).length, 0);
+});
+
+test('in-run compaction folds older steps of a long run into a summary', async () => {
+  const bot = await api('POST', '/api/bots', { name: 'Lux', providerId: 'mock', model: 'mock-large', policy: 'auto', isolation: 'host' });
+  const t = await api('POST', '/api/threads', { members: [bot.id] });
+  await api('PUT', '/api/config', { contextTokens: 3000 });
+  mock.requests.length = 0;
+  let reply;
+  try {
+    [reply] = await say(t.id, 'loop 8');
+  } finally {
+    await api('PUT', '/api/config', { contextTokens: 32000 });
+  }
+  assert.equal(reply.status, 'done', reply.error);
+  assert.equal(text(reply).trim().split('\n').at(-1), 'Finished all 8 steps.');
+  assert.equal(reply.parts.filter((p) => p.type === 'tool').length, 8, 'every step still visible in the UI');
+  assert.match(reply.runSummary.text, /^PROGRESS: completed \d+ steps of 8\.$/);
+  assert.ok(reply.stepStarts.includes(reply.runSummary.upTo));
+
+  // The summary request is the run's own prompt plus one message, so it can hit the prompt cache.
+  const forks = mock.requests.filter((r) => /^Pause the task\./.test(r.messages.at(-1).content));
+  assert.ok(forks.length >= 1);
+  for (const f of forks) {
+    assert.equal(f.tool_choice, 'none');
+    const prev = mock.requests[mock.requests.indexOf(f) - 1];
+    assert.equal(JSON.stringify(f.tools), JSON.stringify(prev.tools));
+    assert.equal(JSON.stringify(f.messages.slice(0, prev.messages.length)), JSON.stringify(prev.messages), 'fork extends the previous prompt');
+  }
+  // After compaction, requests are back under budget and carry the summary instead of old outputs.
+  const last = mock.requests.at(-1);
+  assert.match(JSON.stringify(last), /PROGRESS: completed/);
+  assert.ok(last.messages.filter((m) => m.role === 'tool').length < 8);
+  assert.ok(JSON.stringify(last.messages).length / 4 < 3000 * 1.5);
 });

@@ -27,7 +27,9 @@ starts one locally and can connect to any number of remote ones. A bot lives on 
 | Teamwork | Group chats with a lead and `@mention` hand-offs; `ask_teammate` delegation from any chat (visible as its own thread). |
 | Routines | Saved prompts run on a cron schedule or on demand; bots can save routines themselves. |
 | Memory | Per-bot `MEMORY.md` (written by the bot, editable by you) plus a shared, read-mostly `TEAM.md` per runtime that every bot reads. Only bots marked "Team memory writer" can append to it. |
-| Long threads | When a thread outgrows the budget (`compactChars`, default 120k characters), older messages are folded into a rolling summary. The full history stays visible in the UI. |
+| Long threads & long tasks | Past a context budget (Settings → Context, default 32k tokens, estimated) older messages fold into a rolling thread summary, and older *steps of a running task* fold into a summary the bot writes itself. If that summary fails, old tool outputs are cleared instead. The full history stays visible in the UI. |
+| Prompt caching | Prompts are built to be byte-stable across a run: a two-part system prompt (stable first, memory/summary second), no clock time, a fixed tool order. Anthropic-format providers get explicit `cache_control` breakpoints; OpenAI-compatible providers rely on their automatic prefix caching. Token usage, including cache hits, is shown on each reply. |
+| Images | `read_file` on a PNG/JPEG/GIF/WebP, browser screenshots and MCP image results are shown to the model during the run that produced them. Models that reject images get the request retried without them, and are remembered. |
 | Isolation | Per bot: **Own container** (Docker or Podman; only that bot's workspace is mounted) or **Host**. New bots default to a container when an engine is running. |
 | Connectors | Stdio MCP servers configured per runtime. |
 | Controls | Ask-first / Autonomous / Read-only per bot, inline approvals, Stop. |
@@ -82,8 +84,12 @@ node test/mock-provider.mjs 4999   # a fake provider at http://127.0.0.1:4999/v1
   Use "Ask first", or prefer a container or VM.
 - **Single user.** One access token per runtime; no accounts, roles or audit log.
 - **Team memory is per runtime** and not synced between your laptop and a VM.
-- **Summarisation is per message.** One very long single turn (dozens of large tool results) can
-  still overflow a small model's context.
+- **Context size is estimated** (about 4 characters per token, a flat ~1,600 tokens per image), not
+  counted. Measured usage is reported in the UI but does not drive compaction.
+- **Images are kept only for the run that produced them.** Later turns see a file path and can
+  re-open it with `read_file`.
+- **Prompt caching with Anthropic uses the default 5-minute TTL.** A reply after a longer pause
+  rewrites the cache once. Whether a provider caches at all is up to the provider.
 - **Not built:** Slack/Teams presence, joining meetings, learning a routine by watching your screen,
   OAuth-style app connectors (MCP only), mobile app.
 - **Untested:** installers (`npm run dist`), the default container image and non-root container mode

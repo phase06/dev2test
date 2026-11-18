@@ -87,12 +87,21 @@ export class McpClient {
     });
   }
 
-  async call(name: string, args: unknown): Promise<string> {
+  async call(name: string, args: unknown): Promise<{ text: string; images: { mediaType: string; data: string }[] }> {
     const r = await this.request('tools/call', { name, arguments: args }, 300000);
+    const images: { mediaType: string; data: string }[] = [];
     const text = (r.content || [])
-      .map((c: any) => (c.type === 'text' ? c.text : `[${c.type} content]`))
+      .map((c: any) => {
+        if (c.type === 'text') return c.text;
+        if (c.type === 'image' && typeof c.data === 'string') {
+          images.push({ mediaType: c.mimeType || 'image/png', data: c.data });
+          return '';
+        }
+        return `[${c.type} content]`;
+      })
+      .filter(Boolean)
       .join('\n');
-    return (r.isError ? 'Error: ' : '') + text;
+    return { text: (r.isError ? 'Error: ' : '') + text, images };
   }
 
   stop() {

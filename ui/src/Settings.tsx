@@ -115,10 +115,13 @@ export function Settings({ rt, remotes, saveRemotes, homeId }: { rt: Runtime; re
   const [name, setName] = useState(rt.info?.name ?? '');
   const [sb, setSb] = useState(rt.config?.sandbox);
   const [sbNote, setSbNote] = useState('');
+  const [budget, setBudget] = useState(String(rt.config?.contextTokens ?? ''));
+  const [budgetNote, setBudgetNote] = useState('');
   useEffect(() => {
     setMcp(rt.config?.mcpServers ?? []);
     setName(rt.info?.name ?? '');
     setSb(rt.config?.sandbox);
+    setBudget(String(rt.config?.contextTokens ?? ''));
   }, [rt.conn.id, rt.config?.mcpServers.length, rt.info?.name, rt.config?.sandbox.image]);
   if (!rt.config) return <div className="page"><p className="note error">{rt.error || 'Loading…'}</p></div>;
 
@@ -173,6 +176,20 @@ export function Settings({ rt, remotes, saveRemotes, homeId }: { rt: Runtime; re
           <Field label="Name of this runtime">
             <input value={name} onChange={(e) => setName(e.target.value)} onBlur={() => name.trim() && name !== rt.info?.name && rt.client.put('/api/config', { name }).then(rt.reload)} />
           </Field>
+        </div>
+      </section>
+
+      <section>
+        <h3>Context</h3>
+        <p className="lede">When a conversation, or a single long task, grows past this many tokens, teammates summarise older parts so they can keep going. Lower saves cost and suits small local models; higher keeps more detail. Full history always stays visible here.</p>
+        <div className="grid2">
+          <Field label="Context budget (tokens)" hint="Estimated at about 4 characters per token. Default 32,000.">
+            <input type="number" min={1000} step={1000} value={budget} onChange={(e) => setBudget(e.target.value)} />
+          </Field>
+        </div>
+        <div className="page-foot">
+          <button className="btn sm primary" disabled={Number(budget) < 1000} onClick={() => rt.client.put('/api/config', { contextTokens: Number(budget) }).then(() => (setBudgetNote('Saved.'), rt.reload()), (e) => setBudgetNote(e.message))}>Save context budget</button>
+          <small>{budgetNote}</small>
         </div>
       </section>
 

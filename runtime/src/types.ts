@@ -34,8 +34,8 @@ export interface Config {
   /** Other runtimes this one's UI knows about (remote VMs). */
   connections: Connection[];
   sandbox: SandboxCfg;
-  /** Unsummarised thread history (in characters) above which older messages are summarised. */
-  compactChars: number;
+  /** Estimated context size (tokens) above which older history, or older steps of a run, are summarised. */
+  contextTokens: number;
 }
 
 export interface SandboxCfg {
@@ -91,7 +91,7 @@ export type ToolStatus = 'pending' | 'approval' | 'running' | 'done' | 'error' |
 
 export type Part =
   | { type: 'text'; text: string }
-  | { type: 'tool'; id: string; name: string; args: string; result?: string; status: ToolStatus; approvalId?: string };
+  | { type: 'tool'; id: string; name: string; args: string; result?: string; status: ToolStatus; approvalId?: string; images?: string[] };
 
 export interface Message {
   id: string;
@@ -101,6 +101,22 @@ export interface Message {
   parts: Part[];
   status: 'streaming' | 'done' | 'error' | 'stopped';
   error?: string;
+  /** Index into `parts` where each model call of this run began. */
+  stepStarts?: number[];
+  /** Earlier steps of this run, folded into a summary: parts before `upTo` are no longer sent to the model. */
+  runSummary?: { text: string; upTo: number };
+  /** Fallback when summarising failed: tool outputs before this part index are no longer sent. */
+  clearedUpTo?: number;
+  usage?: Usage;
+}
+
+/** Token usage, summed over every model call in a run. `input` excludes cache reads and writes. */
+export interface Usage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  calls: number;
 }
 
 export interface Routine {
