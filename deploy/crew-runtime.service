@@ -1,0 +1,19 @@
+# systemd unit for a VM. Copy dist/ to /opt/crew, create a `crew` user, then:
+#   sudo cp deploy/crew-runtime.service /etc/systemd/system/ && sudo systemctl enable --now crew-runtime
+#   sudo -u crew CREW_HOME=/var/lib/crew node /opt/crew/crew-runtime.mjs --token
+[Unit]
+Description=Crew runtime (AI teammates)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=crew
+Environment=CREW_HOME=/var/lib/crew
+# Binds to localhost: reach it through `ssh -L 4781:127.0.0.1:4780 vm`, a VPN, or a TLS reverse proxy.
+ExecStart=/usr/bin/node /opt/crew/crew-runtime.mjs --host 127.0.0.1 --port 4780
+Restart=always
+RestartSec=3
+StateDirectory=crew
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,59 @@
+{
+  "name": "crew",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop agent app: AI teammates that run locally or on a remote VM, with any model provider.",
+  "type": "module",
+  "main": "desktop/main.cjs",
+  "bin": {
+    "crew-runtime": "dist/crew-runtime.mjs"
+  },
+  "scripts": {
+    "build": "npm run build:runtime && npm run build:ui",
+    "build:runtime": "esbuild runtime/src/cli.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/crew-runtime.mjs --external:playwright",
+    "build:ui": "vite build ui",
+    "typecheck": "tsc --noEmit -p .",
+    "start": "node dist/crew-runtime.mjs",
+    "desktop": "electron .",
+    "test": "node --test test/runtime.test.mjs",
+    "test:ui": "node test/ui-smoke.mjs",
+    "test:desktop": "node test/desktop-smoke.cjs",
+    "dist": "npm run build && npx electron-builder"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "electron": "^33.4.11",
+    "esbuild": "^0.24.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0"
+  },
+  "build": {
+    "appId": "dev.crew.app",
+    "productName": "Crew",
+    "files": [
+      "desktop/**",
+      "dist/**",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "dist/**"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}

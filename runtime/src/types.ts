@@ -1,0 +1,139 @@
+export interface Provider {
+  id: string;
+  name: string;
+  /** "openai" = any OpenAI-compatible /chat/completions endpoint (xAI, OpenAI, OpenRouter, Ollama, LM Studio, vLLM…) */
+  kind: 'openai' | 'anthropic';
+  baseUrl: string;
+  apiKey?: string;
+  hasKey?: boolean;
+  models: string[];
+  headers?: Record<string, string>;
+  stream?: boolean;
+  maxTokens?: number;
+}
+
+export interface McpServerCfg {
+  name: string;
+  /** Full command line of a stdio MCP server, e.g. "npx -y @modelcontextprotocol/server-filesystem /data" */
+  command: string;
+  enabled: boolean;
+}
+
+export interface Connection {
+  id: string;
+  name: string;
+  url: string;
+  token: string;
+}
+
+export interface Config {
+  token: string;
+  name: string;
+  providers: Provider[];
+  mcpServers: McpServerCfg[];
+  /** Other runtimes this one's UI knows about (remote VMs). */
+  connections: Connection[];
+  sandbox: SandboxCfg;
+  /** Unsummarised thread history (in characters) above which older messages are summarised. */
+  compactChars: number;
+}
+
+export interface SandboxCfg {
+  /** Image for isolated bots; needs bash and coreutils. */
+  image: string;
+  /** Whether containers get network access. */
+  network: boolean;
+  /** Run as root inside the container (lets bots apt-get install; on Linux, files they create are root-owned). */
+  asRoot: boolean;
+}
+
+export type Policy = 'auto' | 'ask' | 'readonly';
+
+export interface BotTools {
+  shell: boolean;
+  files: boolean;
+  web: boolean;
+  browser: boolean;
+  mcp: boolean;
+  team: boolean;
+  /** Trusted to append to the shared TEAM.md. */
+  teamMemory: boolean;
+}
+
+export interface Bot {
+  id: string;
+  name: string;
+  color: string;
+  role: string;
+  instructions: string;
+  providerId: string;
+  model: string;
+  policy: Policy;
+  /** Where shell commands run: on the runtime host, or in this bot's own container. */
+  isolation: 'host' | 'container';
+  tools: BotTools;
+  createdAt: number;
+}
+
+export interface Thread {
+  id: string;
+  title: string;
+  kind: 'dm' | 'group' | 'routine' | 'internal';
+  members: string[];
+  createdAt: number;
+  updatedAt: number;
+  hops: number;
+  /** Rolling summary of the first `count` messages, which are no longer replayed to the models. */
+  summary?: { text: string; count: number };
+}
+
+export type ToolStatus = 'pending' | 'approval' | 'running' | 'done' | 'error' | 'denied';
+
+export type Part =
+  | { type: 'text'; text: string }
+  | { type: 'tool'; id: string; name: string; args: string; result?: string; status: ToolStatus; approvalId?: string };
+
+export interface Message {
+  id: string;
+  threadId: string;
+  ts: number;
+  author: { type: 'user' | 'bot' | 'system'; id?: string; name: string };
+  parts: Part[];
+  status: 'streaming' | 'done' | 'error' | 'stopped';
+  error?: string;
+}
+
+export interface Routine {
+  id: string;
+  name: string;
+  botId: string;
+  prompt: string;
+  /** 5-field cron in the runtime's local time; empty = manual only. */
+  cron: string;
+  enabled: boolean;
+  threadId?: string;
+  lastRun?: number;
+}
+
+export type BotStatus = 'idle' | 'working' | 'approval';
+
+export interface StatusSnapshot {
+  bots: Record<string, BotStatus>;
+  threads: string[];
+}
+
+export interface RuntimeInfo {
+  name: string;
+  version: string;
+  platform: string;
+  hostname: string;
+  home: string;
+  mcp: { name: string; status: string; tools: number; error?: string }[];
+  sandbox: { available: boolean; engine: string; version: string };
+}
+
+export type ServerEvent =
+  | { type: 'message'; message: Message }
+  | { type: 'delta'; threadId: string; messageId: string; text: string }
+  | { type: 'changed'; what: 'bots' | 'threads' | 'routines' | 'config' }
+  | { type: 'status'; status: StatusSnapshot };
