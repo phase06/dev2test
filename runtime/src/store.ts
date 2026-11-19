@@ -47,7 +47,11 @@ if (!db.config) {
 db.config.connections ??= [];
 db.config.mcpServers ??= [];
 db.config.sandbox ??= { image: 'node:22-bookworm', network: true, asRoot: process.platform !== 'linux' };
-db.config.compactChars ??= 120000;
+{
+  const c = db.config as Config & { compactChars?: number };
+  c.contextTokens ??= c.compactChars ? Math.round(c.compactChars / 4) : 32000;
+  delete c.compactChars;
+}
 
 const msgCache = new Map<string, Message[]>();
 

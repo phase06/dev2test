@@ -96,6 +96,19 @@ try {
   await page.getByText(/looks good/).waitFor();
   await shot('group-chat');
 
+  // Images in tool results, and token usage on the reply.
+  const bots = await (await fetch(`${local.url}/api/bots`, { headers: { authorization: `Bearer ${local.token}` } })).json();
+  const adaId = bots.find((b) => b.name === 'Ada').id;
+  fs.copyFileSync(new URL('../docs/team-memory.png', import.meta.url), path.join(tmp, 'my-laptop', 'workspaces', adaId, 'chart.png'));
+  await page.getByRole('button', { name: 'Team', exact: true }).click();
+  await page.getByRole('button', { name: /^A Ada/ }).click();
+  await send('look at chart.png');
+  await page.getByText('I can see 1 image(s).').waitFor();
+  await page.locator('img.shot').first().waitFor();
+  if (!(await page.locator('img.shot').first().evaluate((img) => img.complete && img.naturalWidth > 0))) errors.push('tool image did not load');
+  await page.locator('.usage').last().waitFor();
+  await shot('image-and-usage');
+
   // Team memory.
   await page.getByRole('button', { name: 'Team', exact: true }).click();
   await page.locator('.team-memory textarea').fill('- We ship on Fridays.\n- The CTO is Sam.');

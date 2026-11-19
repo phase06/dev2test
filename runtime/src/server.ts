@@ -89,7 +89,7 @@ on('GET', '/api/config', () => ({
   mcpServers: db.config.mcpServers,
   connections: db.config.connections,
   sandbox: db.config.sandbox,
-  compactChars: db.config.compactChars,
+  contextTokens: db.config.contextTokens,
 }));
 on('GET', '/api/team-memory', () => ({ text: teamMemory() }));
 on('PUT', '/api/team-memory', ({ body }) => (setTeamMemory(String(body.text ?? '')), { ok: true }));
@@ -98,7 +98,7 @@ on('PUT', '/api/config', async ({ body }) => {
   if (Array.isArray(body.providers))
     db.config.providers = body.providers.map((p: Provider) => ({ ...withKey(p), id: p.id || newId('prov') }));
   if (Array.isArray(body.connections)) db.config.connections = body.connections;
-  if (Number(body.compactChars) >= 200) db.config.compactChars = Number(body.compactChars);
+  if (Number(body.contextTokens) >= 100) db.config.contextTokens = Math.round(Number(body.contextTokens));
   if (body.sandbox && typeof body.sandbox === 'object')
     db.config.sandbox = {
       image: String(body.sandbox.image || '').trim() || db.config.sandbox.image,

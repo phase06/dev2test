@@ -1,17 +1,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import type { Bot, BotStatus, Message, Part, Routine, StatusSnapshot, Thread } from './types';
+import type { Bot, BotStatus, Message, Part, Routine, StatusSnapshot, Thread, Usage } from './types';
 import type { Provider } from './types';
-import { chat, type ChatMsg } from './providers';
+import { chat, ProviderError, type ChatMsg, type ChatResult, type ImageInput, type ToolDef } from './providers';
 import { db, emit, messages, newId, safePath, save, teamMemory, wsDir } from './store';
-import { toolsFor, type Tool, type ToolCtx } from './tools';
+import { IMAGE_TYPES, MAX_IMAGE_BYTES, toolsFor, type Tool, type ToolCtx } from './tools';
 
 const MAX_STEPS = 50;
 const MAX_HOPS = 12; // bot-to-bot handoffs allowed per human message in a group chat
 const HISTORY = 200; // hard cap on replayed messages, in case summarisation keeps failing
 const KEEP_RECENT = 10; // messages always replayed verbatim
 const OLD_RESULT = 3000; // tool results in my earlier turns are clipped to this
+const MAX_IMAGES = 20; // images per request; the oldest are dropped beyond this
+const IMAGE_TOKENS = 1600; // rough cost of one image, for the context estimate
 
 type ToolPart = Extract<Part, { type: 'tool' }>;
 interface Approval {
@@ -52,7 +54,13 @@ const textOf = (m: Message) =>
     .join('\n')
     .trim();
 
-function systemPrompt(bot: Bot, thread: Thread): string {
+/**
+ * The system prompt in two parts, built once per run and reused for every step so the prompt cache
+ * keeps hitting. The first part changes only when the bot or team is edited; the second holds
+ * memory and the thread summary, which change between runs. Nothing here may change per request
+ * (no clock time): any byte that changes invalidates the cache for everything after it.
+ */
+function systemPrompt(bot: Bot, thread: Thread): [string, string] {
   const ws = wsDir(bot.id);
   let memory = '';
   try {
@@ -71,7 +79,7 @@ function systemPrompt(bot: Bot, thread: Thread): string {
         : thread.kind === 'routine'
           ? 'This thread is a scheduled routine. Nobody may be watching: do the work end to end and finish with a short report of the outcome.'
           : 'This is a direct conversation with the user.';
-  return [
+  const stable = [
     `You are ${bot.name}${bot.role ? `, ${bot.role}` : ''} — an AI teammate in Crew. You are a colleague who finishes work, not a chatbot that describes it.`,
     bot.instructions.trim(),
     `## Your computer
@@ -79,44 +87,94 @@ ${
   bot.isolation === 'container'
     ? `You have your own Linux container (image ${db.config.sandbox.image}${db.config.sandbox.network ? '' : ', no network access'}) on "${db.config.name}". Shell commands run inside it, starting in /workspace, which is your persistent workspace; everything outside /workspace is reset when the container is rebuilt. File tools take paths relative to the workspace.`
     : `You run directly on "${db.config.name}" (${os.platform()} ${os.arch()}). Your workspace directory is ${ws}; file tools are confined to it and shell commands start there.`
-} Use your tools to actually do the task, verify the result, then report briefly: what you did, where the output is, and anything the user must decide. If something is ambiguous but low-risk, make a sensible choice and say so.`,
+} Use your tools to actually do the task, verify the result, then report briefly: what you did, where the output is, and anything the user must decide. If something is ambiguous but low-risk, make a sensible choice and say so. To look at an image (a chart you made, a screenshot, a design), open it with read_file. For the exact time, run \`date\`.`,
     `## Conversation\n${where}`,
     mates.length ? `## Your team\n${mates.map((b) => `- ${b.name}: ${b.role || 'teammate'}`).join('\n')}` : '',
+    'Use the remember tool for durable preferences and facts. When you complete a workflow the user will want repeated, offer to save it with save_routine.',
+  ];
+  const changing = [
     team ? `## Team memory\nShared notes every teammate reads (TEAM.md). Treat them as standing context from the user.\n${team}` : '',
     thread.summary ? `## Earlier in this conversation\nOlder messages are no longer shown to you in full. Summary of them:\n${thread.summary.text}` : '',
-    `## Memory\nUse the remember tool for durable preferences and facts. When you complete a workflow the user will want repeated, offer to save it with save_routine.\n${memory ? `Your saved memory:\n${memory}` : '(nothing saved yet)'}`,
-    `Current time: ${new Date().toString()}`,
-  ]
-    .filter(Boolean)
-    .join('\n\n');
+    `## Your memory\n${memory || '(nothing saved yet)'}`,
+    `Today is ${new Date().toDateString()}.`, // date only: changes once a day, not every request
+  ];
+  const join = (l: string[]) => l.filter(Boolean).join('\n\n');
+  return [join(stable), join(changing)];
 }
 
-function buildContext(bot: Bot, thread: Thread): ChatMsg[] {
-  const out: ChatMsg[] = [{ role: 'system', content: systemPrompt(bot, thread) }];
+const segmentsOf = (m: Message): Part[][] => {
+  // Each model call's text and tool calls. Messages from before step tracking fall back to
+  // "text followed by tools" grouping.
+  if (m.stepStarts?.length) return m.stepStarts.map((st, i) => m.parts.slice(st, m.stepStarts![i + 1] ?? m.parts.length));
+  const segs: Part[][] = [];
+  let cur: Part[] = [];
+  for (const p of m.parts) {
+    if (p.type === 'text' && cur.some((x) => x.type === 'tool')) (segs.push(cur), (cur = []));
+    cur.push(p);
+  }
+  if (cur.length) segs.push(cur);
+  return segs;
+};
+
+function loadImage(ws: string, rel: string): ImageInput | null {
+  try {
+    const f = safePath(ws, rel);
+    const mediaType = IMAGE_TYPES[path.extname(f).toLowerCase()];
+    if (!mediaType || fs.statSync(f).size > MAX_IMAGE_BYTES) return null;
+    return { mediaType, data: fs.readFileSync(f).toString('base64') };
+  } catch {
+    return null;
+  }
+}
+
+interface CtxOpts {
+  sys: [string, string];
+  /** The message this run is writing: its tool results go in full, with images. */
+  currentId?: string;
+  /** Leave images out (the model rejected them). */
+  noImages?: boolean;
+}
+
+function buildContext(bot: Bot, thread: Thread, o: CtxOpts): ChatMsg[] {
+  const out: ChatMsg[] = [
+    { role: 'system', content: o.sys[0] },
+    { role: 'system', content: o.sys[1] },
+  ];
+  const ws = wsDir(bot.id);
   const msgs = messages(thread.id).slice(thread.summary?.count ?? 0).slice(-HISTORY);
   for (const m of msgs) {
-    const current = m === msgs[msgs.length - 1];
     if (m.author.type === 'bot' && m.author.id === bot.id) {
-      // Replay my own turn as assistant messages interleaved with tool results.
-      let cur: { content: string; calls: ToolPart[] } | null = null;
-      const flush = () => {
-        if (cur && (cur.content || cur.calls.length)) {
-          out.push({ role: 'assistant', content: cur.content, toolCalls: cur.calls.map((c) => ({ id: c.id, name: c.name, args: c.args })) });
-          for (const c of cur.calls) out.push({ role: 'tool', toolCallId: c.id, content: c.result === undefined ? '(interrupted before a result was produced)' : current || c.result.length <= OLD_RESULT ? c.result : c.result.slice(0, OLD_RESULT) + '\n…[clipped]' });
-        }
-        cur = null;
-      };
-      for (const p of m.parts) {
-        if (p.type === 'text') {
-          if (cur?.calls.length) flush();
-          cur ??= { content: '', calls: [] };
-          cur.content += p.text;
-        } else {
-          cur ??= { content: '', calls: [] };
-          cur.calls.push(p);
+      // Replay my own turn: one assistant message per model call, each followed by its tool results.
+      const current = m.id === o.currentId;
+      const from = m.runSummary?.upTo ?? 0;
+      if (m.runSummary)
+        out.push({ role: 'user', content: `[Summary of your earlier steps in this task — their full tool outputs are no longer shown]\n${m.runSummary.text}` });
+      for (const seg of segmentsOf(m)) {
+        const idx = m.parts.indexOf(seg[0]);
+        if (idx < from) continue;
+        const text = seg.filter((p) => p.type === 'text').map((p) => (p as { text: string }).text).join('');
+        const calls = seg.filter((p): p is ToolPart => p.type === 'tool');
+        if (!text && !calls.length) continue;
+        out.push({ role: 'assistant', content: text, toolCalls: calls.map((c) => ({ id: c.id, name: c.name, args: c.args })) });
+        for (const c of calls) {
+          const cleared = m.clearedUpTo !== undefined && m.parts.indexOf(c) < m.clearedUpTo;
+          let content =
+            c.result === undefined
+              ? '(interrupted before a result was produced)'
+              : cleared
+                ? '[output cleared to save context]'
+                : current || c.result.length <= OLD_RESULT
+                  ? c.result
+                  : c.result.slice(0, OLD_RESULT) + '\n…[clipped]';
+          let images: ImageInput[] | undefined;
+          if (c.images?.length) {
+            // Images are sent only while the run that produced them is in progress.
+            if (current && !cleared && !o.noImages) images = c.images.map((p) => loadImage(ws, p)).filter((x): x is ImageInput => !!x);
+            else content += `\n[image${c.images.length > 1 ? 's' : ''} not shown: ${c.images.join(', ')} — open with read_file to look again]`;
+          }
+          out.push({ role: 'tool', toolCallId: c.id, content, ...(images?.length ? { images } : {}) });
         }
       }
-      flush();
     } else {
       const text = textOf(m);
       if (!text) continue;
@@ -124,7 +182,28 @@ function buildContext(bot: Bot, thread: Thread): ChatMsg[] {
       out.push({ role: 'user', content: plain ? text : `[${m.author.name}]: ${text}` });
     }
   }
+  // Cap the number of images per request, dropping the oldest.
+  let budget = MAX_IMAGES;
+  for (let i = out.length - 1; i >= 0; i--) {
+    const im = out[i].images;
+    if (!im) continue;
+    const keep = Math.max(0, Math.min(im.length, budget));
+    budget -= keep;
+    if (keep < im.length) out[i] = { ...out[i], images: im.slice(im.length - keep), content: out[i].content + '\n[older images omitted]' };
+  }
   return out;
+}
+
+/** Rough token estimate: ~4 characters per token, plus a flat cost per image. */
+export function estimateTokens(msgs: ChatMsg[]) {
+  let chars = 0;
+  let images = 0;
+  for (const m of msgs) {
+    chars += m.content.length;
+    for (const t of m.toolCalls || []) chars += t.args.length + t.name.length;
+    images += m.images?.length ?? 0;
+  }
+  return Math.ceil(chars / 4) + images * IMAGE_TOKENS;
 }
 
 const SUMMARISER = `You maintain a running summary of a workplace conversation so that AI teammates can continue it without the full transcript. Update the summary with the new messages.
@@ -140,7 +219,7 @@ const sizeOf = (m: Message) => m.parts.reduce((n, p) => n + (p.type === 'text' ?
 async function compact(bot: Bot, thread: Thread, provider: Provider, signal: AbortSignal) {
   const start = thread.summary?.count ?? 0;
   const live = messages(thread.id).slice(start, -1); // the last message is the reply being written
-  const limit = db.config.compactChars;
+  const limit = db.config.contextTokens * 4; // characters
   if (live.length <= 2 || live.reduce((n, m) => n + sizeOf(m), 0) <= limit) return;
   // Keep the most recent messages verbatim, but never more than half the budget's worth.
   let keep = 0;
@@ -177,6 +256,65 @@ async function compact(bot: Bot, thread: Thread, provider: Provider, signal: Abo
   save('threads');
   emit({ type: 'changed', what: 'threads' });
 }
+
+const RUN_SUMMARISER = `Pause the task. Your context is getting long, so your earlier steps in this task are about to be replaced by a summary that you write now. Write it for yourself, to carry on from where you are.
+Include: the goal and any constraints from the user; what you have done so far and what you found, with exact file paths, commands, ids, numbers and error messages you will need; decisions you made and why; what remains to do next.
+Leave out output you no longer need. Plain text, under 400 words. Do not call any tools; reply with the summary only.`;
+
+/**
+ * In-run compaction. When the context for the next step is over budget, fold this run's older
+ * steps into a summary the bot writes itself. The summary request reuses the exact prompt of the
+ * run (same system, tools and history) with one extra message, so it reads from the prompt cache.
+ * If summarising fails, fall back to dropping those steps' tool outputs.
+ */
+async function compactRun(bot: Bot, thread: Thread, msg: Message, provider: Provider, sys: [string, string], tools: ToolDef[], signal: AbortSignal, call: CallFn) {
+  const budget = db.config.contextTokens;
+  const starts = msg.stepStarts ?? [];
+  const from = Math.max(msg.runSummary?.upTo ?? 0, msg.clearedUpTo ?? 0);
+  const open = starts.filter((st) => st >= from);
+  if (open.length < 2) return false; // nothing older than the latest step to fold
+  // Keep the newest steps verbatim, up to half the budget, and always at least the latest one.
+  let keepFrom = open[open.length - 1];
+  const total = estimateTokens(buildContext(bot, thread, { sys, currentId: msg.id }));
+  for (let i = open.length - 2; i >= 1; i--) {
+    const size = total - estimateTokensOfParts(msg, from, open[i]);
+    if (size > budget / 2) break;
+    keepFrom = open[i];
+  }
+  try {
+    const ctx = [...buildContext(bot, thread, { sys, currentId: msg.id }), { role: 'user' as const, content: RUN_SUMMARISER }];
+    const res = await call(ctx, tools, 'none');
+    const text = res.content.trim();
+    if (!text) throw new Error('empty summary');
+    msg.runSummary = { text, upTo: keepFrom };
+  } catch (e: any) {
+    if (signal.aborted) throw e;
+    console.error(`Could not summarise ${bot.name}'s run in "${thread.title}": ${e?.message || e}; clearing old tool outputs instead`);
+    msg.clearedUpTo = keepFrom;
+  }
+  save(`messages/${thread.id}`);
+  emit({ type: 'message', message: msg });
+  return true;
+}
+
+/** Tokens taken by the parts in [from, to) of a message, as they would be replayed. */
+function estimateTokensOfParts(m: Message, from: number, to: number) {
+  let chars = 0;
+  let images = 0;
+  for (const p of m.parts.slice(from, to)) {
+    if (p.type === 'text') chars += p.text.length;
+    else {
+      chars += p.args.length + (p.result?.length ?? 0);
+      images += p.images?.length ?? 0;
+    }
+  }
+  return Math.ceil(chars / 4) + images * IMAGE_TOKENS;
+}
+
+type CallFn = (ctx: ChatMsg[], tools: ToolDef[], toolChoice?: 'auto' | 'none', onDelta?: (t: string) => void) => Promise<ChatResult>;
+
+/** Models (provider id + model) that rejected image input; their requests are sent without images. */
+const noVision = new Set<string>();
 
 function touch(thread: Thread) {
   thread.updatedAt = Date.now();
@@ -286,7 +424,12 @@ async function execTool(part: ToolPart, tools: Tool[], msg: Message, ctx: ToolCt
     }
     part.status = 'running';
     update();
-    part.result = await tool.run(args, ctx);
+    const out = await tool.run(args, ctx);
+    if (typeof out === 'string') part.result = out;
+    else {
+      part.result = out.text;
+      if (out.images?.length) part.images = out.images;
+    }
     part.status = 'done';
   } catch (e: any) {
     part.status = 'error';
@@ -313,17 +456,48 @@ export async function runBot(botId: string, threadId: string, depth: number): Pr
       if (abort.signal.aborted) throw e;
       console.error(`Could not summarise "${thread.title}": ${e?.message || e}`); // carry on with the capped window
     });
+    const sys = systemPrompt(bot, thread); // frozen for the whole run, so every step hits the cache
     const tools = toolsFor(bot, depth);
+    const defs = tools.map((t) => t.def);
     const ctx: ToolCtx = { bot, thread, ws: wsDir(bot.id), signal: abort.signal, depth, delegate: (n, m) => delegate(bot, n, m) };
+    const visionKey = `${provider.id}\u0000${bot.model}`;
+    const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
+    const call: CallFn = async (messagesIn, toolDefs, toolChoice, onDelta) => {
+      let res: ChatResult;
+      const hasImages = messagesIn.some((m) => m.images?.length);
+      try {
+        res = await chat(provider, bot.model, messagesIn, toolDefs, { signal: abort.signal, onDelta, toolChoice });
+      } catch (e) {
+        // A model without vision: retry once without images and remember, if that works.
+        if (!(hasImages && e instanceof ProviderError && e.status >= 400 && e.status < 500 && e.status !== 429)) throw e;
+        const stripped = messagesIn.map((m) => (m.images?.length ? { ...m, images: undefined, content: m.content + '\n[image omitted: this model does not accept images]' } : m));
+        res = await chat(provider, bot.model, stripped, toolDefs, { signal: abort.signal, onDelta, toolChoice });
+        noVision.add(visionKey);
+      }
+      usage.calls++;
+      if (res.usage) {
+        usage.input += res.usage.input;
+        usage.output += res.usage.output;
+        usage.cacheRead += res.usage.cacheRead;
+        usage.cacheWrite += res.usage.cacheWrite;
+      }
+      msg.usage = { ...usage };
+      return res;
+    };
+    const context = () => buildContext(bot, thread, { sys, currentId: msg.id, noImages: noVision.has(visionKey) });
     const onDelta = (text: string) => {
       const last = msg.parts[msg.parts.length - 1];
       if (last?.type === 'text') last.text += text;
       else msg.parts.push({ type: 'text', text });
       emit({ type: 'delta', threadId, messageId: msg.id, text });
     };
+    msg.stepStarts = [];
     let step = 0;
     for (; step < MAX_STEPS; step++) {
-      const res = await chat(provider, bot.model, buildContext(bot, thread), tools.map((t) => t.def), { signal: abort.signal, onDelta });
+      if (step > 0 && estimateTokens(context()) > db.config.contextTokens)
+        await compactRun(bot, thread, msg, provider, sys, defs, abort.signal, call);
+      msg.stepStarts.push(msg.parts.length);
+      const res = await call(context(), defs, 'auto', onDelta);
       if (!res.toolCalls.length) break;
       const parts: ToolPart[] = res.toolCalls.map((tc) => ({ type: 'tool', id: tc.id, name: tc.name, args: tc.args, status: 'pending' }));
       msg.parts.push(...parts);

@@ -3,6 +3,8 @@
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 
+const q0 = (m) => (typeof m.content === 'string' ? m.content : '').toLowerCase();
+
 function decide(body) {
   const sys = body.messages.find((m) => m.role === 'system')?.content || '';
   const me = /You are ([\w-]+)/.exec(sys)?.[1] || 'Bot';
@@ -10,6 +12,20 @@ function decide(body) {
   const has = (n) => (body.tools || []).some((t) => t.function.name === n);
   const call = (name, args) => ({ tool: { name, args: JSON.stringify(args) } });
   if (sys.startsWith('You maintain a running summary')) return { text: 'SUMMARY: the user prefers teal and the launch is on Friday.' };
+  const textOf = (m) => (typeof m.content === 'string' ? m.content : (m.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('\n')) || '';
+  const images = body.messages.flatMap((m) => (Array.isArray(m.content) ? m.content.filter((c) => c.type === 'image_url') : []));
+  if (body.model === 'blind' && images.length) return { status: 400, error: 'image input is not supported by this model' };
+  // "loop N": call the shell N times with bulky output, surviving in-run summaries.
+  const reqIdx = body.messages.findLastIndex((m) => m.role === 'user' && /loop \d+/.test(textOf(m)));
+  if (reqIdx >= 0) {
+    const goal = Number(/loop (\d+)/.exec(textOf(body.messages[reqIdx]))[1]);
+    const after = body.messages.slice(reqIdx + 1);
+    const done = Math.max(0, ...after.map((m) => Number((m.role === 'tool' ? / step (\d+)\n/ : /PROGRESS: completed (\d+) steps/).exec(textOf(m))?.[1] ?? 0)));
+    if (textOf(last).startsWith('Pause the task.')) return { text: `PROGRESS: completed ${done} steps of ${goal}.` };
+    if (last.role === 'tool' || last.role === 'user') return done < goal ? call('shell', { command: `printf 'x%.0s' $(seq 1 2000); echo " step ${done + 1}"` }) : { text: `Finished all ${goal} steps.` };
+  }
+  if (q0(last).includes('look at') && has('read_file')) return call('read_file', { path: /look at (\S+)/.exec(textOf(last))[1] });
+  if (last.role === 'user' && Array.isArray(last.content) && images.length) return { text: `I can see ${images.length} image(s).` };
   if (last.role === 'tool') return { text: `Done. Result:\n\n\`\`\`\n${String(last.content).slice(0, 200)}\n\`\`\`` };
   const raw = /sh(?:\[(\d+)\])?: ([\s\S]+)$/.exec(String(last.content || ''));
   if (raw && has('shell')) return call('shell', { command: raw[2], ...(raw[1] ? { timeout: Number(raw[1]) } : {}) });
@@ -37,7 +53,12 @@ export function startMock(port = 0) {
     req.on('data', (d) => (data += d));
     req.on('end', async () => {
       const body = JSON.parse(data);
+      server.requests.push(body);
       const d = decide(body);
+      if (d.status) {
+        res.writeHead(d.status, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ error: { message: d.error } }));
+      }
       if (!body.stream) {
         res.writeHead(200, { 'content-type': 'application/json' });
         const message = d.tool
@@ -59,9 +80,12 @@ export function startMock(port = 0) {
           await new Promise((r) => setTimeout(r, 8));
         }
       }
+      if (body.stream_options?.include_usage)
+        res.write(`data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 60 } } })}\n\n`);
       res.end('data: [DONE]\n\n');
     });
   });
+  server.requests = [];
   return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve(server)));
 }
 

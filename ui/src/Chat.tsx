@@ -36,7 +36,6 @@ function ToolCard({ part, rt, botId }: { part: ToolPart; rt: Runtime; botId?: st
   const { label, detail } = describe(part);
   const asking = part.status === 'approval';
   const decide = (decision: string) => rt.client.post(`/api/approvals/${part.approvalId}`, { decision }).catch(() => {});
-  const shot = part.name === 'browser' && /Saved screenshot to (\S+)/.exec(part.result || '')?.[1];
   return (
     <div className={`tool ${part.status}`}>
       <button className="tool-head" onClick={() => setOpen(!open)} aria-expanded={open || asking}>
@@ -51,7 +50,11 @@ function ToolCard({ part, rt, botId }: { part: ToolPart; rt: Runtime; botId?: st
           {part.result !== undefined && <pre className="tool-result">{part.result}</pre>}
         </div>
       )}
-      {shot && botId && <img className="shot" src={rt.client.fileUrl(botId, shot)} alt="Browser screenshot" />}
+      {botId && part.images?.map((p) => (
+        <a key={p} href={rt.client.fileUrl(botId, p)} target="_blank" rel="noreferrer" title={p}>
+          <img className="shot" src={rt.client.fileUrl(botId, p)} alt={`Image from ${part.name}: ${p}`} />
+        </a>
+      ))}
       {asking && (
         <div className="approve">
           <button className="btn primary sm" onClick={() => decide('approve')}>Approve</button>
@@ -63,8 +66,22 @@ function ToolCard({ part, rt, botId }: { part: ToolPart; rt: Runtime; botId?: st
   );
 }
 
+const fmtTokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(n >= 1e4 ? 0 : 1)}k` : String(n));
+
+function UsageBadge({ u }: { u: NonNullable<Message['usage']> }) {
+  const totalIn = u.input + u.cacheRead + u.cacheWrite;
+  if (!totalIn && !u.output) return null;
+  const cached = totalIn ? Math.round((u.cacheRead / totalIn) * 100) : 0;
+  return (
+    <span className="usage" title={`${u.calls} model call${u.calls === 1 ? '' : 's'} · input ${u.input} · cache read ${u.cacheRead} · cache write ${u.cacheWrite} · output ${u.output} tokens`}>
+      {fmtTokens(totalIn)} in{u.cacheRead > 0 ? ` (${cached}% cached)` : ''} · {fmtTokens(u.output)} out
+    </span>
+  );
+}
+
 function MessageRow({ m, rt, bot }: { m: Message; rt: Runtime; bot?: Bot }) {
   const working = m.status === 'streaming';
+  const foldAt = m.runSummary?.upTo ?? m.clearedUpTo;
   return (
     <div className={`msg ${m.author.type}`}>
       {m.author.type === 'bot' ? <Avatar bot={bot} name={m.author.name} /> : <Avatar name={m.author.type === 'user' ? 'You' : '↻'} />}
@@ -73,10 +90,18 @@ function MessageRow({ m, rt, bot }: { m: Message; rt: Runtime; bot?: Bot }) {
           <strong>{m.author.name}</strong>
           {bot?.role && <span>{bot.role}</span>}
           <time>{new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
+          {m.usage && <UsageBadge u={m.usage} />}
         </div>
-        {m.parts.map((p, i) =>
-          p.type === 'text' ? <Markdown key={i} text={p.text} /> : <ToolCard key={p.id + i} part={p} rt={rt} botId={m.author.id} />,
-        )}
+        {m.parts.map((p, i) => (
+          <Fragment key={(p.type === 'tool' ? p.id : 't') + i}>
+            {i === foldAt && i > 0 && (
+              <div className="divider small">
+                <span>{m.runSummary ? `${m.author.name} sees a summary of the steps above` : `Outputs above were cleared from ${m.author.name}'s context`}</span>
+              </div>
+            )}
+            {p.type === 'text' ? <Markdown text={p.text} /> : <ToolCard part={p} rt={rt} botId={m.author.id} />}
+          </Fragment>
+        ))}
         {working && !m.parts.some((p) => p.type === 'tool' && p.status === 'approval') && <div className="typing"><i /><i /><i /></div>}
         {m.status === 'stopped' && <div className="note">Stopped.</div>}
         {m.status === 'error' && <div className="note error">{m.error}</div>}
@@ -131,6 +156,17 @@ export function Chat({ rt, thread, onEditBot }: { rt: Runtime; thread: Thread; o
     const el = scroller.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [msgs]);
+
+  // Images load after layout; keep the view pinned to the bottom when they do.
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const onLoad = () => {
+      if (stick.current) el.scrollTop = el.scrollHeight;
+    };
+    el.addEventListener('load', onLoad, true);
+    return () => el.removeEventListener('load', onLoad, true);
+  }, []);
 
   const send = async () => {
     const text = draft.trim();

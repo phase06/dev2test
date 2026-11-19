@@ -165,7 +165,9 @@ textarea { resize: vertical; line-height: 1.45; }
 .tool-body pre { margin: 0; padding: 8px 12px; border-top: 1px solid var(--line); background: var(--code); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow-y: auto; }
 .tool-result { background: var(--panel) !important; }
 .approve { display: flex; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--line); flex-wrap: wrap; }
-.shot { display: block; max-width: 100%; border-top: 1px solid var(--line); }
+.shot { display: block; max-width: 100%; max-height: 360px; object-fit: contain; border-top: 1px solid var(--line); background: var(--code); }
+.usage { margin-left: auto; font-variant-numeric: tabular-nums; }
+.divider.small { margin: 8px 0; }
 .typing { display: flex; gap: 4px; padding: 6px 0; } .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: pulse 1.2s infinite; } .typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
 .empty-chat { max-width: 380px; margin: 14vh auto 0; text-align: center; color: var(--muted); display: flex; flex-direction: column; align-items: center; gap: 12px; }
 .composer { padding: 0 24px 18px; max-width: 868px; width: 100%; margin: 0 auto; }
