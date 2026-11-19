@@ -108,6 +108,9 @@ export interface Message {
   /** Fallback when summarising failed: tool outputs before this part index are no longer sent. */
   clearedUpTo?: number;
   usage?: Usage;
+  /** Model the provider reported serving this run's last call, and why that call stopped. */
+  model?: string;
+  stopReason?: string;
 }
 
 /** Token usage, summed over every model call in a run. `input` excludes cache reads and writes. */

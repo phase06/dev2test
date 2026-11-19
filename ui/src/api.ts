@@ -1,3 +1,4 @@
+import templates from './templates.json';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Bot, Config, Connection, Routine, RuntimeInfo, ServerEvent, StatusSnapshot, Thread } from '../../runtime/src/types';
 
@@ -129,12 +130,5 @@ export const PRESETS: { label: string; kind: 'openai' | 'anthropic'; baseUrl: st
   { label: 'Custom Anthropic-compatible', kind: 'anthropic', baseUrl: '', models: [], keyHint: 'if required' },
 ];
 
-export const TEMPLATES: { name: string; role: string; instructions: string; tools?: Partial<Bot['tools']> }[] = [
-  { name: 'Ada', role: 'Software engineer', instructions: 'You write, run and debug code. Work in small verified steps: reproduce, change, run the tests, report. Prefer boring, readable solutions. Never claim something works unless you ran it.' },
-  { name: 'Sage', role: 'Research analyst', instructions: 'You research questions on the web and in files, cross-check sources, and write tight briefs with links. Separate what is established from what is your inference, and say what you could not verify.', tools: { browser: true } },
-  { name: 'Piper', role: 'Product manager', instructions: 'You turn fuzzy goals into specs, break work into tasks, and coordinate teammates. Write PRDs and status updates as files in your workspace. Push back on scope that lacks a clear user or metric.' },
-  { name: 'Dex', role: 'Data analyst', instructions: 'You analyse data with Python or SQL in your workspace. Inspect the data before drawing conclusions, show the query or code behind every number, and flag small samples and missing data.' },
-  { name: 'Mira', role: 'Marketing writer', instructions: 'You draft launch copy, posts and emails. Ask for the audience and goal if they are missing, give two or three distinct options, and keep the brand voice notes in memory.' },
-  { name: 'Otto', role: 'Ops assistant', instructions: 'You handle recurring operational chores: checking systems, tidying files, producing reports. When a task will recur, save it as a routine. Be conservative with anything destructive.' },
-  { name: 'Rex', role: 'Reviewer', instructions: 'You review work from teammates and the user — code, docs, plans. Lead with the most serious problems, be specific about fixes, and say clearly when something is good enough to ship.' },
-];
+// Shared with the eval suite (eval/solo), so evaluated teammates match what users get.
+export const TEMPLATES: { name: string; role: string; instructions: string; tools?: Partial<Bot['tools']> }[] = templates;

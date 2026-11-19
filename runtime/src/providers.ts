@@ -31,7 +31,14 @@ export interface ChatResult {
   content: string;
   toolCalls: ToolCall[];
   usage?: Omit<Usage, 'calls'>;
+  /** Model id reported by the provider, when it reports one. */
+  model?: string;
+  /** Why generation stopped, normalised: 'end', 'tool_use', 'max_tokens', 'refusal' or the raw value. */
+  stopReason?: string;
 }
+
+const normStop = (s?: string | null) =>
+  !s ? undefined : s === 'end_turn' || s === 'stop' || s === 'stop_sequence' ? 'end' : s === 'tool_calls' ? 'tool_use' : s === 'length' ? 'max_tokens' : s;
 interface Opts {
   signal?: AbortSignal;
   onDelta?: (text: string) => void;
@@ -180,15 +187,21 @@ async function openaiChat(p: Provider, model: string, msgs: ChatMsg[], tools: To
       content,
       toolCalls: (m.tool_calls || []).map((t: any) => ({ id: t.id || tcId(), name: t.function?.name, args: t.function?.arguments || '{}' })),
       usage: openaiUsage(j.usage),
+      model: j.model,
+      stopReason: normStop(j.choices?.[0]?.finish_reason),
     };
   }
 
   let content = '';
   let usage: ChatResult['usage'];
+  let served: string | undefined;
+  let stop: string | undefined;
   const calls: ToolCall[] = [];
   for await (const ev of sse(r)) {
     if (ev.error) throw new Error(`Model provider error: ${ev.error.message || JSON.stringify(ev.error)}`);
     if (ev.usage) usage = openaiUsage(ev.usage);
+    if (ev.model) served = ev.model;
+    if (ev.choices?.[0]?.finish_reason) stop = ev.choices[0].finish_reason;
     const d = ev.choices?.[0]?.delta;
     if (!d) continue;
     if (typeof d.content === 'string' && d.content) {
@@ -203,7 +216,7 @@ async function openaiChat(p: Provider, model: string, msgs: ChatMsg[], tools: To
       if (t.function?.arguments) c.args += t.function.arguments;
     }
   }
-  return { content, usage, toolCalls: calls.filter(Boolean).map((c) => ({ ...c, id: c.id || tcId(), args: c.args || '{}' })) };
+  return { content, usage, model: served, stopReason: normStop(stop), toolCalls: calls.filter(Boolean).map((c) => ({ ...c, id: c.id || tcId(), args: c.args || '{}' })) };
 }
 
 // ---------- Anthropic Messages ----------
@@ -277,15 +290,21 @@ async function anthropicChat(p: Provider, model: string, msgs: ChatMsg[], tools:
       if (b.type === 'tool_use') toolCalls.push({ id: b.id, name: b.name, args: JSON.stringify(b.input || {}) });
     }
     if (content) o.onDelta?.(content);
-    return { content, toolCalls, usage: anthropicUsage(j.usage) };
+    return { content, toolCalls, usage: anthropicUsage(j.usage), model: j.model, stopReason: normStop(j.stop_reason) };
   }
 
   let content = '';
   let usage: ChatResult['usage'];
+  let served: string | undefined;
+  let stop: string | undefined;
   const blocks: Record<number, ToolCall> = {};
   for await (const ev of sse(r)) {
     if (ev.type === 'error') throw new Error(`Model provider error: ${ev.error?.message || JSON.stringify(ev.error)}`);
-    if (ev.type === 'message_start') usage = anthropicUsage(ev.message?.usage);
+    if (ev.type === 'message_start') {
+      usage = anthropicUsage(ev.message?.usage);
+      served = ev.message?.model;
+    }
+    if (ev.type === 'message_delta' && ev.delta?.stop_reason) stop = ev.delta.stop_reason;
     if (ev.type === 'message_delta' && ev.usage) {
       // message_delta carries cumulative counts; some fields may be absent.
       const d = anthropicUsage(ev.usage)!;
@@ -300,7 +319,7 @@ async function anthropicChat(p: Provider, model: string, msgs: ChatMsg[], tools:
       } else if (ev.delta?.type === 'input_json_delta' && blocks[ev.index]) blocks[ev.index].args += ev.delta.partial_json;
     }
   }
-  return { content, usage, toolCalls: Object.values(blocks).map((b) => ({ ...b, args: b.args || '{}' })) };
+  return { content, usage, model: served, stopReason: normStop(stop), toolCalls: Object.values(blocks).map((b) => ({ ...b, args: b.args || '{}' })) };
 }
 
 export function chat(p: Provider, model: string, msgs: ChatMsg[], tools: ToolDef[], o: Opts = {}): Promise<ChatResult> {

@@ -1,0 +1,5 @@
+{
+  "prompt": "sales.csv has last quarter's orders. Work out total revenue (quantity × unit price) per region, ignoring refunded orders, and save it as region_totals.json mapping region name to total, rounded to 2 decimals. Also tell me which region was highest.",
+  "tags": ["data", "medium"],
+  "template": "Dex"
+}

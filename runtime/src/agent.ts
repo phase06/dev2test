@@ -482,6 +482,8 @@ export async function runBot(botId: string, threadId: string, depth: number): Pr
         usage.cacheWrite += res.usage.cacheWrite;
       }
       msg.usage = { ...usage };
+      if (res.model) msg.model = res.model;
+      if (res.stopReason) msg.stopReason = res.stopReason;
       return res;
     };
     const context = () => buildContext(bot, thread, { sys, currentId: msg.id, noImages: noVision.has(visionKey) });

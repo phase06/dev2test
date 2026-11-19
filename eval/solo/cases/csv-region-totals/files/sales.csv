@@ -1,0 +1,241 @@
+order_id,region,quantity,unit_price,status
+A0001,East,3,72.88,refunded
+A0002,North,6,106.15,paid
+A0003,North,7,77.02,paid
+A0004,North,10,24.91,paid
+A0005,North,10,106.64,refunded
+A0006,South,5,77.19,paid
+A0007,South,2,105.94,paid
+A0008,North,10,13.55,paid
+A0009,West,6,85.41,paid
+A0010,South,3,126.72,paid
+A0011,West,6,132.11,paid
+A0012,North,9,77.01,paid
+A0013,West,7,9.94,paid
+A0014,East,6,126.07,paid
+A0015,West,2,151.67,paid
+A0016,North,1,132.42,paid
+A0017,West,5,129.84,paid
+A0018, west ,6,32.74,refunded
+A0019,East,3,133.69,paid
+A0020,West,2,32.45,paid
+A0021,South,7,155.93,paid
+A0022,East,11,159.50,paid
+A0023,South,3,44.06,paid
+A0024,South,5,52.90,paid
+A0025,East,3,125.22,paid
+A0026,North,8,162.22,paid
+A0027,West,7,73.62,refunded
+A0028,North,4,14.92,paid
+A0029,East,10,12.31,refunded
+A0030,North,6,111.63,refunded
+A0031,West,3,115.29,paid
+A0032,West,2,23.42,paid
+A0033,West,8,58.20,paid
+A0034, east ,8,149.71,paid
+A0035,East,3,125.14,paid
+A0036,East,11,155.81,paid
+A0037,East,3,65.96,paid
+A0038,East,11,42.48,paid
+A0039,South,4,147.84,paid
+A0040,West,6,132.39,paid
+A0041,West,5,37.28,paid
+A0042,East,6,17.26,refunded
+A0043,East,4,88.43,paid
+A0044,North,8,163.93,paid
+A0045,North,7,141.47,paid
+A0046,South,7,142.68,paid
+A0047,West,8,74.05,paid
+A0048,South,3,7.88,paid
+A0049,South,10,149.29,paid
+A0050, east ,3,100.11,paid
+A0051,North,9,135.66,paid
+A0052,South,4,7.95,paid
+A0053, east ,5,99.35,paid
+A0054,East,8,120.26,paid
+A0055,South,9,29.88,paid
+A0056,South,10,3.70,paid
+A0057,West,10,131.36,paid
+A0058,West,2,159.33,refunded
+A0059,North,2,92.87,paid
+A0060,North,8,60.63,paid
+A0061,South,12,52.06,paid
+A0062,South,12,95.61,paid
+A0063,South,8,27.27,paid
+A0064,North,11,45.59,refunded
+A0065,North,3,169.29,paid
+A0066,East,3,174.26,paid
+A0067,West,8,31.81,paid
+A0068,West,9,74.47,paid
+A0069,North,12,67.77,paid
+A0070,North,7,61.68,paid
+A0071,North,2,177.36,paid
+A0072,North,2,50.00,refunded
+A0073,East,3,148.10,paid
+A0074,East,7,29.44,paid
+A0075,East,2,52.39,paid
+A0076,North,5,169.09,paid
+A0077,North,10,154.55,refunded
+A0078,West,1,63.03,paid
+A0079,East,10,25.87,paid
+A0080,North,3,49.36,paid
+A0081,East,9,137.43,paid
+A0082,South,5,64.42,refunded
+A0083,North,1,132.76,paid
+A0084,West,4,168.43,refunded
+A0085,West,11,90.62,paid
+A0086,East,12,41.09,paid
+A0087,South,7,178.13,paid
+A0088,North,2,113.70,paid
+A0089,North,2,120.75,paid
+A0090,East,10,45.87,paid
+A0091,South,5,81.91,paid
+A0092,East,4,9.10,paid
+A0093,South,1,62.35,refunded
+A0094,South,4,92.34,refunded
+A0095, north ,3,73.71,refunded
+A0096,East,11,44.21,paid
+A0097,South,11,161.03,paid
+A0098,East,12,177.30,paid
+A0099,South,1,149.00,paid
+A0100,West,12,127.09,paid
+A0101,North,11,106.38,paid
+A0102,South,2,8.52,paid
+A0103,North,7,150.94,paid
+A0104, south ,8,49.69,paid
+A0105,North,11,96.10,paid
+A0106,North,5,44.56,paid
+A0107,West,8,152.66,refunded
+A0108, east ,1,112.20,paid
+A0109,South,6,47.95,paid
+A0110,South,1,88.39,paid
+A0111,North,12,41.53,paid
+A0112,East,8,85.46,paid
+A0113, south ,5,176.13,paid
+A0114,West,2,148.12,paid
+A0115,East,7,40.14,paid
+A0116,North,3,135.31,paid
+A0117,East,2,127.49,paid
+A0118,West,7,7.40,refunded
+A0119,West,7,56.45,paid
+A0120,East,2,151.72,refunded
+A0121, west ,2,169.36,paid
+A0122,East,5,68.88,paid
+A0123,North,6,166.80,paid
+A0124,East,2,12.14,paid
+A0125,South,4,174.87,paid
+A0126,East,7,159.52,paid
+A0127,South,12,17.26,paid
+A0128,South,11,156.90,paid
+A0129,South,3,86.58,paid
+A0130,East,7,119.11,paid
+A0131,West,2,32.62,paid
+A0132,West,9,41.94,paid
+A0133, west ,7,27.71,paid
+A0134,East,9,19.12,paid
+A0135,South,1,135.69,paid
+A0136,South,7,50.83,paid
+A0137,East,3,124.56,paid
+A0138,South,2,50.97,paid
+A0139,West,7,171.85,paid
+A0140,North,3,8.71,paid
+A0141,West,10,89.70,refunded
+A0142,West,8,46.98,refunded
+A0143,North,12,127.08,paid
+A0144, north ,9,140.50,refunded
+A0145,North,11,129.56,paid
+A0146,West,12,138.20,refunded
+A0147, south ,7,49.18,paid
+A0148,East,8,52.31,paid
+A0149, south ,8,96.15,paid
+A0150,West,12,117.99,refunded
+A0151,West,2,48.53,paid
+A0152,South,8,9.04,paid
+A0153,West,4,4.20,paid
+A0154,North,4,90.74,paid
+A0155,South,4,85.33,paid
+A0156,North,10,90.75,paid
+A0157,West,11,12.99,paid
+A0158,North,4,7.18,paid
+A0159,North,3,72.62,paid
+A0160,North,2,167.89,paid
+A0161,West,1,58.19,paid
+A0162,East,8,32.96,refunded
+A0163,East,7,172.13,paid
+A0164,South,7,66.12,paid
+A0165,West,2,11.72,paid
+A0166,West,4,60.23,paid
+A0167, west ,4,146.69,paid
+A0168,North,8,14.08,paid
+A0169,North,10,63.02,paid
+A0170,North,5,135.12,paid
+A0171,East,1,130.72,paid
+A0172,North,1,149.21,refunded
+A0173,West,7,142.79,paid
+A0174,South,8,35.38,paid
+A0175,South,10,44.80,paid
+A0176,North,9,37.92,paid
+A0177,North,11,8.99,paid
+A0178, west ,2,177.84,paid
+A0179,North,7,91.23,paid
+A0180,South,3,76.78,paid
+A0181,North,5,55.00,paid
+A0182,East,4,80.77,paid
+A0183,East,10,36.32,refunded
+A0184, south ,9,96.16,paid
+A0185,West,1,21.11,paid
+A0186, west ,6,10.14,paid
+A0187,South,10,175.21,paid
+A0188,East,9,156.30,paid
+A0189,North,2,115.83,paid
+A0190,North,6,63.18,refunded
+A0191,North,10,132.60,paid
+A0192,East,7,123.06,paid
+A0193, south ,1,143.76,paid
+A0194,North,7,120.53,paid
+A0195,South,7,126.09,paid
+A0196,East,7,171.71,paid
+A0197,East,7,76.71,paid
+A0198,East,11,37.90,paid
+A0199,North,7,162.59,paid
+A0200,West,10,159.26,paid
+A0201,North,1,100.62,paid
+A0202,North,10,113.13,paid
+A0203,South,6,53.14,paid
+A0204,North,7,89.82,paid
+A0205,South,5,25.42,paid
+A0206,West,6,12.45,paid
+A0207,South,11,142.09,paid
+A0208,South,8,35.38,paid
+A0209,South,7,66.58,paid
+A0210,South,1,159.44,paid
+A0211,East,2,72.00,paid
+A0212,East,11,77.35,paid
+A0213, east ,8,92.13,paid
+A0214,West,8,44.64,paid
+A0215, west ,3,146.46,paid
+A0216,East,7,67.66,paid
+A0217,North,1,115.65,refunded
+A0218,North,1,136.11,paid
+A0219,South,1,154.70,paid
+A0220,North,4,26.30,paid
+A0221, south ,11,142.54,paid
+A0222,East,10,136.84,paid
+A0223,East,8,28.41,paid
+A0224,South,10,49.53,paid
+A0225,North,4,35.23,paid
+A0226, east ,7,32.87,paid
+A0227,North,11,154.92,paid
+A0228,North,5,178.75,paid
+A0229, east ,5,69.51,paid
+A0230,East,2,81.28,paid
+A0231,North,5,148.11,paid
+A0232, east ,12,3.32,refunded
+A0233, west ,7,93.74,paid
+A0234, south ,10,118.60,refunded
+A0235,East,5,21.83,paid
+A0236,East,10,26.67,paid
+A0237,South,3,5.50,paid
+A0238,West,2,14.27,paid
+A0239, east ,7,146.65,paid
+A0240,East,10,117.27,paid
