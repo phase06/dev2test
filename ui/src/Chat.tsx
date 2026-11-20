@@ -99,12 +99,12 @@ function MessageRow({ m, rt, bot }: { m: Message; rt: Runtime; bot?: Bot }) {
                 <span>{m.runSummary ? `${m.author.name} sees a summary of the steps above` : `Outputs above were cleared from ${m.author.name}'s context`}</span>
               </div>
             )}
-            {p.type === 'text' ? <Markdown text={p.text} /> : <ToolCard part={p} rt={rt} botId={m.author.id} />}
+            {p.type === 'text' ? <Markdown text={p.text} /> : p.type === 'note' ? <div className="progress-note">{p.text}</div> : <ToolCard part={p} rt={rt} botId={m.author.id} />}
           </Fragment>
         ))}
         {working && !m.parts.some((p) => p.type === 'tool' && p.status === 'approval') && <div className="typing"><i /><i /><i /></div>}
         {m.status === 'stopped' && <div className="note">Stopped.</div>}
-        {m.status === 'error' && <div className="note error">{m.error}</div>}
+        {m.status === 'error' && <div className={`note error${m.refusal ? ' refusal' : ''}`}>{m.refusal ? <strong>Declined. </strong> : null}{m.error}</div>}
       </div>
     </div>
   );

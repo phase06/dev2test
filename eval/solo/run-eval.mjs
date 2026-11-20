@@ -215,19 +215,24 @@ async function cleanup(env) {
 function toTranscript(prompt, msg) {
   const t = [{ role: 'user', content: prompt }];
   if (msg.runSummary) t.push({ role: 'system', content: `[in-run summary written at part ${msg.runSummary.upTo}]\n${msg.runSummary.text}` });
+  let note = '';
   for (const p of msg.parts) {
-    if (p.type === 'text') {
+    if (p.type === 'note') {
+      note += (note ? '\n' : '') + p.text; // progress notes go on the next turn as its thinking
+    } else if (p.type === 'text') {
       const last = t[t.length - 1];
-      if (last.role === 'assistant') last.content += p.text;
-      else t.push({ role: 'assistant', content: p.text });
+      if (last.role === 'assistant' && !note) last.content += p.text;
+      else t.push({ role: 'assistant', content: p.text, ...(note ? { thinking: note } : {}) });
+      note = '';
     } else {
       let args = p.args;
       try { args = JSON.stringify(JSON.parse(p.args), null, 2); } catch {}
-      t.push({ role: 'tool_call', name: p.name, content: args });
+      t.push({ role: 'tool_call', name: p.name, content: args, ...(note ? { thinking: note } : {}) });
+      note = '';
       t.push({ role: 'tool_result', content: `[${p.status}] ${p.result ?? ''}${p.images?.length ? `\n[images: ${p.images.join(', ')}]` : ''}` });
     }
   }
-  if (msg.status === 'error') t.push({ role: 'system', content: `[run error] ${msg.error}` });
+  if (msg.status === 'error') t.push({ role: 'system', content: `[${msg.refusal ? 'declined' : 'run error'}] ${msg.error}` });
   return t;
 }
 
@@ -250,7 +255,7 @@ async function runCase(input, ctx) {
     const tpl = TEMPLATES.find((t) => t.name === input.template);
     const bot = await env.call('POST', '/api/bots', {
       name: tpl.name, role: tpl.role, instructions: tpl.instructions,
-      providerId: 'p', model: ctx.model, policy: 'auto', isolation: ctx.isolation,
+      providerId: 'p', model: ctx.model, policy: 'auto', isolation: ctx.isolation, ...(ctx.effort ? { effort: ctx.effort } : {}),
       tools: { shell: true, files: true, web: true, browser: false, mcp: false, ...tpl.tools, ...input.tools, team: false, teamMemory: false },
     });
     env.botId = bot.id;
@@ -276,7 +281,8 @@ async function runCase(input, ctx) {
         throw e;
       }
     }
-    if (msg.status === 'error') {
+    // A refusal is the model's answer, so it is scored (the checks will fail), not filed as an error.
+    if (msg.status === 'error' && !msg.refusal) {
       const e = new Error(`run failed: ${msg.error}`);
       e.failure_class = /Model provider|ECONN|fetch failed|timed out/i.test(msg.error) ? 'serving_error' : 'harness_error';
       throw e;
@@ -304,6 +310,7 @@ async function runCase(input, ctx) {
         model_calls: u.calls,
         compactions: (msg.runSummary ? 1 : 0) + (msg.clearedUpTo !== undefined ? 1 : 0),
         paused_at_step_limit: /Paused after \d+ steps/.test(text) ? 1 : 0,
+        refused: msg.refusal ? 1 : 0,
       },
     };
   } finally {
@@ -406,7 +413,7 @@ function parseArgs(argv) {
               approveHarness: false,
               // Crew-specific
               kind: 'anthropic', baseUrl: 'https://api.anthropic.com', isolation: 'container',
-              caseTimeoutS: 900, contextTokens: undefined, image: undefined,
+              caseTimeoutS: 900, contextTokens: undefined, image: undefined, effort: undefined,
               judgeModel: 'claude-haiku-5-5', judgeBaseUrl: 'https://api.anthropic.com' };
   // A flag at the end of argv would otherwise consume undefined - which for
   // --model equals the default and silently disables the served-model check.
@@ -426,12 +433,14 @@ function parseArgs(argv) {
     else if (k === '--case-timeout-s') a.caseTimeoutS = +val(++i);
     else if (k === '--context-tokens') a.contextTokens = +val(++i);
     else if (k === '--image') a.image = val(++i);
+    else if (k === '--effort') a.effort = val(++i);
     else if (k === '--judge-model') a.judgeModel = val(++i);
     else if (k === '-h' || k === '--help') { usage(); process.exit(0); }
     else { eprint(`unknown argument: ${k}`); usage(); process.exit(2); }
   }
   if (!['anthropic', 'openai'].includes(a.kind) || !['container', 'host'].includes(a.isolation)
-      || !(a.caseTimeoutS > 0)) { usage(); process.exit(2); }
+      || !(a.caseTimeoutS > 0)
+      || (a.effort && !['low', 'medium', 'high', 'xhigh', 'max'].includes(a.effort))) { usage(); process.exit(2); }
   a.apiKey = process.env.EVAL_API_KEY || (a.kind === 'anthropic' ? process.env.ANTHROPIC_API_KEY : '') || '';
   a.judgeKey = process.env.EVAL_JUDGE_API_KEY || process.env.ANTHROPIC_API_KEY || 'unset';
   if (!/^(baseline|v[1-9]\d*)$/.test(a.variant)) {
@@ -449,7 +458,7 @@ function parseArgs(argv) {
 }
 function usage() {
   eprint('usage: node eval/solo/run-eval.mjs [--flow DIR] [--variant baseline|vN] [--model ID] [--reps N] [--concurrency N] [--timeout-s N (0 = no ceiling)] [--approve-harness]\n'
-    + '         [--kind anthropic|openai] [--base-url URL] [--isolation container|host] [--case-timeout-s N] [--context-tokens N] [--image IMG] [--judge-model ID|none]');
+    + '         [--kind anthropic|openai] [--base-url URL] [--isolation container|host] [--case-timeout-s N] [--context-tokens N] [--image IMG] [--effort low|medium|high|xhigh|max] [--judge-model ID|none]');
 }
 
 // Harness integrity gate. The hillclimb loop gets this runner command

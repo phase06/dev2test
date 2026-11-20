@@ -5,15 +5,12 @@ Last reviewed: 2026-11-20.
 
 ## Blocking the paid eval baseline (branch `eval-solo-tasks`)
 
-- [ ] **Keep Claude thinking blocks across tool calls.** Claude Opus 5.5 always thinks, and the
-      Anthropic adapter (`runtime/src/providers.ts`) currently discards `thinking` blocks. Anthropic's
-      guidance: on the same model, pass thinking blocks back unchanged — "dropping or editing them
-      breaks the turn". Store them on the message, replay them verbatim (with signatures), and test
-      against the real API in the pilot. Untested whether today's code 400s or silently loses reasoning.
-- [ ] **Set `effort` per teammate.** Opus 5.5 defaults to `medium`; agentic work usually wants
-      `high`. Add an effort setting to the bot profile (Anthropic `output_config.effort`).
-- [ ] **Handle refusals.** Check `stop_reason: "refusal"` and consider server-side `fallbacks` for
-      Claude models, instead of treating a refusal as an empty answer.
+- [x] Keep Claude thinking blocks across tool calls (raw blocks replayed verbatim, `drop_block`).
+- [x] Effort per teammate; refusal handling; server-side fallbacks on the Claude API.
+- [ ] **Verify those against the real Claude API in the pilot** — all tests use scripted servers.
+      Watch for: 400s on replayed thinking blocks, the beta features being switched off
+      (`turning off ...` in the runtime log), and whether `drop_block` actually fires after Crew's
+      history edits (send `thinking-binding-controls` and read `input_transformations` to confirm).
 - [ ] **Seed tasks from the user.** 3–5 real tasks plus what makes a task hard; then write ~20 cases
       and get the full set signed off.
 - [ ] **Approve the runner** (`--approve-harness`, user's decision) and do the free mock-provider dry run.

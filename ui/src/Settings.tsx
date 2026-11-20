@@ -68,6 +68,12 @@ function ProviderModal({ rt, initial, onClose }: { rt: Runtime; initial: Provide
         <textarea rows={2} value={models} onChange={(e) => setModels(e.target.value)} placeholder="model-id-1, model-id-2" />
       </Field>
       <label className="check"><input type="checkbox" checked={p.stream !== false} onChange={(e) => setP({ ...p, stream: e.target.checked })} /> Stream responses <small>(turn off for gateways with broken tool-call streaming)</small></label>
+      {p.kind === 'anthropic' && (
+        <label className="check">
+          <input type="checkbox" checked={p.fallbacks ?? /^https:\/\/api\.anthropic\.com/.test(p.baseUrl.trim())} onChange={(e) => setP({ ...p, fallbacks: e.target.checked })} />
+          Retry declined requests on a fallback model <small>(Claude API only; the reply then comes from another Claude model)</small>
+        </label>
+      )}
       {msg && <div className={`note ${msg.ok ? 'ok' : 'error'}`}>{msg.text}</div>}
       <footer className="page-foot">
         <button className="btn primary" onClick={saveIt} disabled={!p.name || !p.baseUrl}>Save</button>

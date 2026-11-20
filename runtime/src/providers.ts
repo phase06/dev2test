@@ -1,4 +1,4 @@
-import type { Provider, Usage } from './types';
+import type { Effort, Provider, Usage } from './types';
 
 export interface ToolCall {
   id: string;
@@ -21,6 +21,11 @@ export interface ChatMsg {
   toolCallId?: string;
   /** Images returned by a tool (role "tool" only). */
   images?: ImageInput[];
+  /**
+   * Anthropic only: the assistant turn's original content blocks (thinking, text, tool_use, ...),
+   * replayed verbatim instead of being rebuilt from content/toolCalls.
+   */
+  raw?: unknown[];
 }
 export interface ToolDef {
   name: string;
@@ -35,15 +40,33 @@ export interface ChatResult {
   model?: string;
   /** Why generation stopped, normalised: 'end', 'tool_use', 'max_tokens', 'refusal' or the raw value. */
   stopReason?: string;
+  /** Set when stopReason is 'refusal'. */
+  refusal?: { category?: string | null; explanation?: string };
+  /** Anthropic only: the content blocks to replay for this turn (see ChatMsg.raw). */
+  raw?: unknown[];
 }
 
 const normStop = (s?: string | null) =>
-  !s ? undefined : s === 'end_turn' || s === 'stop' || s === 'stop_sequence' ? 'end' : s === 'tool_calls' ? 'tool_use' : s === 'length' ? 'max_tokens' : s;
+  !s
+    ? undefined
+    : s === 'end_turn' || s === 'stop' || s === 'stop_sequence'
+      ? 'end'
+      : s === 'tool_calls'
+        ? 'tool_use'
+        : s === 'length'
+          ? 'max_tokens'
+          : s === 'content_filter'
+            ? 'refusal'
+            : s;
 interface Opts {
   signal?: AbortSignal;
   onDelta?: (text: string) => void;
   /** "none" offers the tools (so the cached prefix matches) but forbids calling them. */
   toolChoice?: 'auto' | 'none';
+  /** How hard the model should think. Unset: the model's default. */
+  effort?: Effort;
+  /** Short progress notes the model writes between tool calls (Anthropic thinking "updates"). */
+  onNote?: (text: string) => void;
 }
 
 export class ProviderError extends Error {
@@ -166,6 +189,8 @@ async function openaiChat(p: Provider, model: string, msgs: ChatMsg[], tools: To
     body.tools = tools.map((t) => ({ type: 'function', function: t }));
     if (o.toolChoice === 'none') body.tool_choice = 'none';
   }
+  // OpenAI-style reasoning models take low/medium/high; the higher Claude levels map to high.
+  if (o.effort) body.reasoning_effort = o.effort === 'low' || o.effort === 'medium' ? o.effort : 'high';
   const url = `${base(p)}/chat/completions`;
   if (stream && !noStreamOptions.has(url)) body.stream_options = { include_usage: true };
   let r: Response;
@@ -188,7 +213,8 @@ async function openaiChat(p: Provider, model: string, msgs: ChatMsg[], tools: To
       toolCalls: (m.tool_calls || []).map((t: any) => ({ id: t.id || tcId(), name: t.function?.name, args: t.function?.arguments || '{}' })),
       usage: openaiUsage(j.usage),
       model: j.model,
-      stopReason: normStop(j.choices?.[0]?.finish_reason),
+      stopReason: m.refusal ? 'refusal' : normStop(j.choices?.[0]?.finish_reason),
+      ...(m.refusal || j.choices?.[0]?.finish_reason === 'content_filter' ? { refusal: { explanation: m.refusal || undefined } } : {}),
     };
   }
 
@@ -196,6 +222,7 @@ async function openaiChat(p: Provider, model: string, msgs: ChatMsg[], tools: To
   let usage: ChatResult['usage'];
   let served: string | undefined;
   let stop: string | undefined;
+  let refusalText = '';
   const calls: ToolCall[] = [];
   for await (const ev of sse(r)) {
     if (ev.error) throw new Error(`Model provider error: ${ev.error.message || JSON.stringify(ev.error)}`);
@@ -204,6 +231,7 @@ async function openaiChat(p: Provider, model: string, msgs: ChatMsg[], tools: To
     if (ev.choices?.[0]?.finish_reason) stop = ev.choices[0].finish_reason;
     const d = ev.choices?.[0]?.delta;
     if (!d) continue;
+    if (typeof d.refusal === 'string') refusalText += d.refusal;
     if (typeof d.content === 'string' && d.content) {
       content += d.content;
       o.onDelta?.(d.content);
@@ -216,7 +244,15 @@ async function openaiChat(p: Provider, model: string, msgs: ChatMsg[], tools: To
       if (t.function?.arguments) c.args += t.function.arguments;
     }
   }
-  return { content, usage, model: served, stopReason: normStop(stop), toolCalls: calls.filter(Boolean).map((c) => ({ ...c, id: c.id || tcId(), args: c.args || '{}' })) };
+  const refused = !!refusalText || stop === 'content_filter';
+  return {
+    content,
+    usage,
+    model: served,
+    stopReason: refused ? 'refusal' : normStop(stop),
+    ...(refused ? { refusal: { explanation: refusalText || undefined } } : {}),
+    toolCalls: calls.filter(Boolean).map((c) => ({ ...c, id: c.id || tcId(), args: c.args || '{}' })),
+  };
 }
 
 // ---------- Anthropic Messages ----------
@@ -231,12 +267,57 @@ const parse = (s: string) => {
 
 function anthropicUsage(u: any): ChatResult['usage'] {
   if (!u) return undefined;
-  return { input: n(u.input_tokens), output: n(u.output_tokens), cacheRead: n(u.cache_read_input_tokens), cacheWrite: n(u.cache_creation_input_tokens) };
+  // With server-side fallbacks, top-level usage covers only the attempt that produced the reply;
+  // usage.iterations has every attempt, so sum those when present.
+  const parts: any[] = Array.isArray(u.iterations) && u.iterations.length ? u.iterations : [u];
+  const sum = (k: string) => parts.reduce((t, x) => t + n(x?.[k]), 0);
+  return { input: sum('input_tokens'), output: sum('output_tokens'), cacheRead: sum('cache_read_input_tokens'), cacheWrite: sum('cache_creation_input_tokens') };
 }
 
 const EPHEMERAL = { type: 'ephemeral' } as const;
 
-export function anthropicRequest(model: string, maxTokens: number, msgs: ChatMsg[], tools: ToolDef[], o: Opts, stream: boolean) {
+/**
+ * Optional request features, each behind a beta header that a model or gateway may reject.
+ * A feature is switched off for that provider + model when a 400 names it, instead of failing runs.
+ *   binding:   replay thinking blocks with prefix_mismatch_behavior "drop_block", so a block whose
+ *              earlier context Crew has since edited (memory, clipped outputs, compaction) is dropped
+ *              by the API instead of failing the request (enforced on accounts from 2026-08-31).
+ *   updates:   thinking display "updates": the short notes Claude writes between tool calls.
+ *   fallbacks: server-side fallback to another model when Claude declines a request.
+ */
+type Feature = 'binding' | 'updates' | 'fallbacks';
+const FEATURE_ERRORS: Record<Feature, RegExp> = {
+  binding: /block_binding|prefix_mismatch|thinking-binding|thinking\.type|adaptive/i,
+  updates: /display|thinking-display/i,
+  fallbacks: /fallback/i,
+};
+const BETAS: Record<Feature, string> = {
+  binding: 'thinking-binding-controls-2026-08-01',
+  updates: 'thinking-display-updates-2026-08-18',
+  fallbacks: 'server-side-fallback-2026-07-01',
+};
+const switchedOff = new Map<string, Set<Feature>>();
+
+/** Models that think by default, so sending adaptive thinking changes nothing but lets us set its options. */
+const thinksByDefault = (model: string) => /claude-(opus|sonnet|haiku|fable|mythos)-5/.test(model);
+/** Models with server-side fallback targets. */
+const hasFallbacks = (model: string) => /claude-(opus-5|fable-5|mythos-5|sonnet-5-5)/.test(model);
+const officialHost = (p: Provider) => {
+  try {
+    return new URL(p.baseUrl).hostname === 'api.anthropic.com';
+  } catch {
+    return false;
+  }
+};
+
+function anthropicFeatures(p: Provider, model: string): Feature[] {
+  const f: Feature[] = [];
+  if (thinksByDefault(model)) f.push('binding', 'updates');
+  if ((p.fallbacks ?? officialHost(p)) && hasFallbacks(model)) f.push('fallbacks');
+  return f;
+}
+
+export function anthropicRequest(model: string, maxTokens: number, msgs: ChatMsg[], tools: ToolDef[], o: Opts, stream: boolean, feats: Feature[] = []) {
   // Prompt caching, with explicit breakpoints only (gateways may not support the automatic form):
   //   1. end of the first system block — tools + the stable part of the system prompt
   //   2. end of the last system block — plus memory/summary, which change between runs
@@ -259,6 +340,11 @@ export function anthropicRequest(model: string, maxTokens: number, msgs: ChatMsg
       for (const img of m.images || []) content.push({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } });
       push('user', { type: 'tool_result', tool_use_id: m.toolCallId, content });
     } else if (m.role === 'assistant') {
+      if (m.raw?.length) {
+        // Thinking blocks must go back exactly as received, in their original order.
+        for (const b of m.raw) push('assistant', b);
+        continue;
+      }
       if (m.content) push('assistant', { type: 'text', text: m.content });
       for (const t of m.toolCalls || []) push('assistant', { type: 'tool_use', id: t.id, name: t.name, input: parse(t.args) });
     }
@@ -273,53 +359,142 @@ export function anthropicRequest(model: string, maxTokens: number, msgs: ChatMsg
     body.tools = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }));
     if (o.toolChoice === 'none') body.tool_choice = { type: 'none' };
   }
-  return body;
+  if (feats.includes('binding') || feats.includes('updates'))
+    body.thinking = {
+      type: 'adaptive',
+      ...(feats.includes('updates') ? { display: 'updates' } : {}),
+      ...(feats.includes('binding') ? { block_binding: { prefix_mismatch_behavior: 'drop_block' } } : {}),
+    };
+  if (o.effort) body.output_config = { effort: o.effort };
+  if (feats.includes('fallbacks')) body.fallbacks = 'default';
+  return { body, betas: feats.map((f) => BETAS[f]) };
 }
 
-async function anthropicChat(p: Provider, model: string, msgs: ChatMsg[], tools: ToolDef[], o: Opts): Promise<ChatResult> {
+/**
+ * After a fallback mid-reply, the blocks before the last `fallback` block came from the model that
+ * declined: they are not replayed (except text) and their tool calls are not run.
+ */
+function splitAtFallback(blocks: any[]) {
+  const cut = blocks.findLastIndex((b) => b?.type === 'fallback');
+  // Empty text blocks are rejected by the API on replay, so they are the one thing left out.
+  const raw = blocks.filter((b, i) => b && (i >= cut || b.type === 'text') && !(b.type === 'text' && !b.text));
+  const live = cut >= 0 ? blocks.slice(cut + 1) : blocks;
+  const toolCalls: ToolCall[] = live.filter((b) => b?.type === 'tool_use').map((b) => ({ id: b.id, name: b.name, args: JSON.stringify(b.input ?? {}) }));
+  return { raw, toolCalls, fallbackTo: cut >= 0 ? (blocks[cut].to?.model as string | undefined) : undefined };
+}
+
+async function anthropicOnce(p: Provider, model: string, msgs: ChatMsg[], tools: ToolDef[], o: Opts, feats: Feature[]): Promise<ChatResult> {
   const stream = p.stream !== false;
-  const body = anthropicRequest(model, p.maxTokens || 16000, msgs, tools, o, stream);
-  const r = await post(`${anthropicBase(p)}/v1/messages`, authHeaders(p), body, o.signal);
+  // Thinking counts toward max_tokens, so leave room for it when streaming (no HTTP timeout risk).
+  const { body, betas } = anthropicRequest(model, p.maxTokens || (stream ? 64000 : 16000), msgs, tools, o, stream, feats);
+  const headers = authHeaders(p);
+  const allBetas = [headers['anthropic-beta'], ...betas].filter(Boolean).join(',');
+  if (allBetas) headers['anthropic-beta'] = allBetas;
+  const r = await post(`${anthropicBase(p)}/v1/messages`, headers, body, o.signal);
 
   if (!stream) {
     const j: any = await r.json();
-    let content = '';
-    const toolCalls: ToolCall[] = [];
-    for (const b of j.content || []) {
-      if (b.type === 'text') content += b.text;
-      if (b.type === 'tool_use') toolCalls.push({ id: b.id, name: b.name, args: JSON.stringify(b.input || {}) });
-    }
+    const blocks: any[] = j.content || [];
+    const { raw, toolCalls } = splitAtFallback(blocks);
+    const content = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('');
     if (content) o.onDelta?.(content);
-    return { content, toolCalls, usage: anthropicUsage(j.usage), model: j.model, stopReason: normStop(j.stop_reason) };
+    for (const b of blocks) if (b.type === 'thinking' && b.thinking?.trim()) o.onNote?.(b.thinking.trim());
+    return {
+      content,
+      toolCalls,
+      raw,
+      usage: anthropicUsage(j.usage),
+      model: j.model,
+      stopReason: normStop(j.stop_reason),
+      ...(j.stop_reason === 'refusal' ? { refusal: { category: j.stop_details?.category, explanation: j.stop_details?.explanation } } : {}),
+    };
   }
 
   let content = '';
   let usage: ChatResult['usage'];
   let served: string | undefined;
   let stop: string | undefined;
-  const blocks: Record<number, ToolCall> = {};
+  let stopDetails: any;
+  const blocks: any[] = [];
+  const json: Record<number, string> = {};
   for await (const ev of sse(r)) {
     if (ev.type === 'error') throw new Error(`Model provider error: ${ev.error?.message || JSON.stringify(ev.error)}`);
     if (ev.type === 'message_start') {
       usage = anthropicUsage(ev.message?.usage);
       served = ev.message?.model;
-    }
-    if (ev.type === 'message_delta' && ev.delta?.stop_reason) stop = ev.delta.stop_reason;
-    if (ev.type === 'message_delta' && ev.usage) {
-      // message_delta carries cumulative counts; some fields may be absent.
-      const d = anthropicUsage(ev.usage)!;
-      usage = { input: usage?.input || d.input, output: d.output, cacheRead: usage?.cacheRead || d.cacheRead, cacheWrite: usage?.cacheWrite || d.cacheWrite };
-    }
-    if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use')
-      blocks[ev.index] = { id: ev.content_block.id, name: ev.content_block.name, args: '' };
-    if (ev.type === 'content_block_delta') {
-      if (ev.delta?.type === 'text_delta') {
-        content += ev.delta.text;
-        o.onDelta?.(ev.delta.text);
-      } else if (ev.delta?.type === 'input_json_delta' && blocks[ev.index]) blocks[ev.index].args += ev.delta.partial_json;
+    } else if (ev.type === 'message_delta') {
+      if (ev.delta?.stop_reason) stop = ev.delta.stop_reason;
+      stopDetails = ev.delta?.stop_details ?? ev.stop_details ?? stopDetails;
+      if (ev.usage) {
+        // message_delta carries cumulative counts; some fields may be absent.
+        const d = anthropicUsage(ev.usage)!;
+        usage = Array.isArray(ev.usage.iterations)
+          ? d
+          : { input: usage?.input || d.input, output: d.output, cacheRead: usage?.cacheRead || d.cacheRead, cacheWrite: usage?.cacheWrite || d.cacheWrite };
+      }
+    } else if (ev.type === 'content_block_start' && ev.content_block) {
+      const b = { ...ev.content_block };
+      blocks[ev.index] = b;
+      if (b.type === 'tool_use') json[ev.index] = '';
+      if (b.type === 'text' && b.text) {
+        content += b.text;
+        o.onDelta?.(b.text);
+      }
+    } else if (ev.type === 'content_block_delta') {
+      const b = blocks[ev.index];
+      const d = ev.delta;
+      if (!b || !d) continue;
+      if (d.type === 'text_delta') {
+        b.text = (b.text ?? '') + d.text;
+        content += d.text;
+        o.onDelta?.(d.text);
+      } else if (d.type === 'input_json_delta') json[ev.index] = (json[ev.index] ?? '') + d.partial_json;
+      else if (d.type === 'thinking_delta') b.thinking = (b.thinking ?? '') + d.thinking;
+      else if (d.type === 'signature_delta') b.signature = (b.signature ?? '') + d.signature;
+    } else if (ev.type === 'content_block_stop') {
+      const b = blocks[ev.index];
+      if (b?.type === 'tool_use') b.input = parse(json[ev.index] ?? '');
+      if (b?.type === 'thinking' && b.thinking?.trim()) o.onNote?.(b.thinking.trim());
     }
   }
-  return { content, usage, model: served, stopReason: normStop(stop), toolCalls: Object.values(blocks).map((b) => ({ ...b, args: b.args || '{}' })) };
+  // Normally done at content_block_stop; repeated here in case a stream ended without one.
+  for (const [i, j] of Object.entries(json)) if (blocks[+i]) blocks[+i].input = parse(j);
+  const { raw, toolCalls, fallbackTo } = splitAtFallback(blocks);
+  return {
+    content,
+    usage,
+    raw,
+    toolCalls,
+    model: fallbackTo ?? served,
+    stopReason: normStop(stop),
+    ...(stop === 'refusal' ? { refusal: { category: stopDetails?.category, explanation: stopDetails?.explanation } } : {}),
+  };
+}
+
+async function anthropicChat(p: Provider, model: string, msgs: ChatMsg[], tools: ToolDef[], o: Opts): Promise<ChatResult> {
+  const key = `${base(p)}\u0000${model}`;
+  const off = switchedOff.get(key) ?? new Set<Feature>();
+  switchedOff.set(key, off);
+  for (let attempt = 0; ; attempt++) {
+    const feats = anthropicFeatures(p, model).filter((f) => !off.has(f));
+    try {
+      return await anthropicOnce(p, model, msgs, tools, o, feats);
+    } catch (e) {
+      if (!(e instanceof ProviderError) || e.status !== 400 || !feats.length || attempt >= 3) throw e;
+      const named = feats.filter((f) => FEATURE_ERRORS[f].test(e.body));
+      if (named.length) {
+        named.forEach((f) => off.add(f));
+        console.warn(`${model}: turning off ${named.join(', ')} after: ${e.body.slice(0, 200)}`);
+        continue;
+      }
+      // A 400 that names none of them: try once without any, and keep them off only if that works.
+      const res = await anthropicOnce(p, model, msgs, tools, o, []).catch(() => null);
+      if (!res) throw e;
+      feats.forEach((f) => off.add(f));
+      console.warn(`${model}: turning off ${feats.join(', ')} after: ${e.body.slice(0, 200)}`);
+      return res;
+    }
+  }
 }
 
 export function chat(p: Provider, model: string, msgs: ChatMsg[], tools: ToolDef[], o: Opts = {}): Promise<ChatResult> {
