@@ -45,10 +45,10 @@ Last reviewed: 2026-11-20.
 ## Next up (proposed 2026-11-23)
 
 - [x] Spending limits: runtime, teammate and routine monthly limits; cost per reply (branch `spending-limits`).
-- [ ] **Harden remote runtimes.** The access token appears in URLs (file links, the event stream) and
-      can end up in logs; the API accepts requests from any origin; traffic is plain HTTP unless
-      tunnelled; provider API keys sit in a plain-text config file. Fix: short-lived signed URLs,
-      an origin allowlist, the OS keychain on desktop, a documented TLS setup.
+- [x] Harden remote runtimes: tickets instead of the token in URLs, origin allowlist, built-in TLS
+      and no plain HTTP off loopback, `env:` key references, keys encrypted at rest on desktop.
+- [ ] Remaining: the runtime access token is plain text in config.json; one token, no users/roles;
+      no token rotation command.
 - [ ] **Prompt-injection defence.** Fetched pages and files can carry instructions to an autonomous
       teammate with a shell. Mark fetched content as untrusted; consider requiring approval for risky
       tools right after reading web content.

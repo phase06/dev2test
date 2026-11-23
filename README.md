@@ -68,8 +68,31 @@ ssh -N -L 4781:127.0.0.1:4780 user@vm          # on your machine
 ```
 
 In the app: **Settings → Connect remote** and paste `http://127.0.0.1:4781/#token=…`.
-`deploy/` has a systemd unit and a Dockerfile. The runtime speaks plain HTTP: use an SSH tunnel, VPN
-or a TLS reverse proxy — don't expose `--host 0.0.0.0` to the internet.
+`deploy/` has a systemd unit and a Dockerfile.
+
+**Exposing it directly.** The runtime refuses plain HTTP on a non-loopback address. Either serve HTTPS
+itself, or terminate TLS in front of it:
+
+```bash
+node crew-runtime.mjs --host 0.0.0.0 --tls-cert /etc/crew/cert.pem --tls-key /etc/crew/key.pem
+node crew-runtime.mjs --host 127.0.0.1 --allow-insecure-http   # only behind a TLS reverse proxy on the same host
+```
+
+What protects a runtime:
+
+- **One access token**, accepted only in the `Authorization` header — never in a URL, where it would
+  land in logs and browser history. The "Open:" link carries it in the `#fragment`, which browsers
+  don't send. Image and file links and the live event stream use 15-minute, read-only **tickets**
+  signed per process (a restart invalidates them).
+- **Origin allowlist.** Browsers may call the API only from the runtime's own origin, loopback (the
+  desktop app), or origins added with `--allow-origin` / `CREW_ALLOWED_ORIGINS`. Others get a 403.
+- **Provider API keys** never leave the runtime. Enter `env:VAR_NAME` instead of a key to read it from
+  the runtime's environment (a systemd `EnvironmentFile`, a container secret) so it is never written
+  to disk. The desktop app encrypts keys in `config.json` with a key held in the OS keychain; on Linux
+  this needs a real keyring (libsecret/kwallet), otherwise keys stay in plain text, file mode 0600.
+
+Not covered: the access token itself is stored in plain text in `config.json` (mode 0600), and there
+is one token per runtime, with no separate users or roles.
 
 ## Tests
 

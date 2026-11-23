@@ -34,7 +34,7 @@ async function addProvider() {
   await page.getByRole('button', { name: 'Add provider' }).click();
   const dlg = page.getByRole('dialog');
   await dlg.locator('select').first().selectOption({ label: 'Custom OpenAI-compatible' });
-  await dlg.getByLabel('Name').fill('Company gateway');
+  await dlg.getByLabel('Name', { exact: true }).fill('Company gateway');
   await dlg.getByLabel('Base URL').fill(mockUrl);
   await dlg.getByLabel('API key').fill('sk-test');
   await page.getByRole('button', { name: 'Fetch models' }).click();
@@ -122,7 +122,7 @@ try {
   // Routine.
   await page.getByRole('button', { name: 'Routines' }).click();
   await page.getByRole('button', { name: 'New routine' }).click();
-  await page.getByRole('dialog').getByLabel('Name').fill('Morning digest');
+  await page.getByRole('dialog').getByLabel('Name', { exact: true }).fill('Morning digest');
   await page.getByRole('dialog').getByLabel('Instructions').fill('Say hello and summarise overnight changes.');
   await page.getByRole('dialog').locator('select').last().selectOption({ label: 'Weekdays at 09:00' });
   await page.getByRole('button', { name: 'Save routine' }).click();

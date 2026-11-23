@@ -54,6 +54,7 @@ export function startMock(port = 0) {
     req.on('end', async () => {
       const body = JSON.parse(data);
       server.requests.push(body);
+      server.headers.push(req.headers);
       const d = decide(body);
       if (d.status) {
         res.writeHead(d.status, { 'content-type': 'application/json' });
@@ -86,6 +87,7 @@ export function startMock(port = 0) {
     });
   });
   server.requests = [];
+  server.headers = [];
   return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve(server)));
 }
 

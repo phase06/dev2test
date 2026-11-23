@@ -54,6 +54,11 @@ export interface Config {
   contextTokens: number;
   /** Monthly spending limit for the whole runtime, USD. Unset: no limit. */
   monthlyLimit?: number;
+  /**
+   * Browser origins, besides this runtime's own and loopback ones, allowed to call the API
+   * (e.g. "https://crew-vm1.example.com" when another runtime's web UI manages this one).
+   */
+  allowedOrigins: string[];
 }
 
 export interface SandboxCfg {

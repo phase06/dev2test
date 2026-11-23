@@ -79,7 +79,7 @@ function ProviderModal({ rt, initial, onClose }: { rt: Runtime; initial: Provide
       <Field label="Base URL" hint={p.kind === 'openai' ? 'The URL that /chat/completions is appended to — usually ends in /v1.' : 'The host that /v1/messages is appended to.'}>
         <input value={p.baseUrl} onChange={(e) => setP({ ...p, baseUrl: e.target.value })} placeholder="https://your-gateway.example.com/v1" />
       </Field>
-      <Field label="API key" hint={`Stored only on the runtime “${rt.info?.name}”, never sent back to this app.`}>
+      <Field label="API key" hint={`Stored only on the runtime “${rt.info?.name}”, never sent back to this app. Or enter env:VARIABLE_NAME to read it from the runtime's environment, so it's never written to disk.`}>
         <input type="password" value={p.apiKey || ''} onChange={(e) => setP({ ...p, apiKey: e.target.value })} placeholder={p.hasKey ? 'Saved — leave blank to keep' : PRESETS[preset].keyHint} autoComplete="off" />
       </Field>
       <Field label="Models" hint="Comma-separated model ids offered when configuring a teammate.">
@@ -138,7 +138,7 @@ function RuntimeModal({ onAdd, onClose }: { onAdd: (c: Conn) => Promise<void>; o
   return (
     <Modal title="Connect a remote runtime" onClose={onClose}>
       <p className="lede">Run the Crew runtime on any VM or server, then paste the link it prints. Teammates you create there keep working when this computer is asleep.</p>
-      <pre className="code">{`# on the VM (Node 20+)\nnode crew-runtime.mjs --host 0.0.0.0 --name my-vm\n\n# safer: keep it on 127.0.0.1 and tunnel from here\nssh -N -L 4781:127.0.0.1:4780 user@my-vm`}</pre>
+      <pre className="code">{`# on the VM (Node 20+): keep it on 127.0.0.1\nnode crew-runtime.mjs --name my-vm\n\n# and tunnel from here\nssh -N -L 4781:127.0.0.1:4780 user@my-vm\n\n# or serve HTTPS directly\nnode crew-runtime.mjs --host 0.0.0.0 --tls-cert cert.pem --tls-key key.pem`}</pre>
       <Field label="Runtime URL or the full “Open:” link"><input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://127.0.0.1:4781" autoFocus /></Field>
       {!url.includes('#token=') && <Field label="Access token" hint="Printed at startup, or run: node crew-runtime.mjs --token"><input type="password" value={token} onChange={(e) => setToken(e.target.value)} /></Field>}
       {err && <div className="note error">{err}</div>}

@@ -11,4 +11,6 @@ WORKDIR /app
 COPY dist/ /app/
 VOLUME /data
 EXPOSE 4780
-CMD ["node", "/app/crew-runtime.mjs"]
+# Inside the container it must bind 0.0.0.0; publish the port on 127.0.0.1 only (as above) and reach
+# it over SSH or a TLS proxy, or mount a certificate and set CREW_TLS_CERT / CREW_TLS_KEY instead.
+CMD ["node", "/app/crew-runtime.mjs", "--allow-insecure-http"]

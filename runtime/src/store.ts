@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import type { Bot, Config, Ledger, Message, Routine, ServerEvent, Thread } from './types';
+import { encryptionEnabled, openKey, sealKey } from './secrets';
 
 export const HOME = path.resolve(process.env.CREW_HOME || path.join(os.homedir(), '.crew'));
 fs.mkdirSync(path.join(HOME, 'messages'), { recursive: true });
@@ -19,6 +20,11 @@ function load<T>(n: string, def: T): T {
 }
 
 function write(n: string, data: unknown) {
+  if (n === 'config.json') {
+    // Provider keys are encrypted on disk when a master key is available (see secrets.ts).
+    const c = data as Config;
+    data = { ...c, providers: (c.providers ?? []).map((p) => ({ ...p, apiKey: sealKey(p.apiKey) })) };
+  }
   const f = file(n);
   const t = f + '.tmp';
   fs.writeFileSync(t, JSON.stringify(data, null, 1), { mode: 0o600 });
@@ -45,7 +51,11 @@ if (!db.config) {
   } as unknown as Config;
   write('config.json', db.config);
 }
+for (const p of db.config.providers ?? []) p.apiKey = openKey(p.apiKey, p.name);
+// Encrypt keys that are still stored in plain text, now that a master key is available.
+if (encryptionEnabled() && (db.config.providers ?? []).some((p) => p.apiKey && sealKey(p.apiKey) !== p.apiKey)) write('config.json', db.config);
 db.config.connections ??= [];
+db.config.allowedOrigins ??= [];
 db.config.mcpServers ??= [];
 db.config.sandbox ??= { image: 'node:22-bookworm', network: true, asRoot: process.platform !== 'linux' };
 {

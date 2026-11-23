@@ -1,17 +1,45 @@
 // Electron shell: starts the bundled runtime as a child process (the "local" runtime), shows its UI,
 // and stays in the tray so teammates and routines keep running when the window is closed.
-const { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog } = require('electron');
+const { app, BrowserWindow, Menu, Tray, nativeImage, shell, dialog, safeStorage } = require('electron');
+const fs = require('node:fs');
+const crypto = require('node:crypto');
 const { fork } = require('node:child_process');
 const path = require('node:path');
 
 const RUNTIME = path.join(__dirname, '..', 'dist', 'crew-runtime.mjs').replace('app.asar', 'app.asar.unpacked');
 let runtime, win, tray, home, quitting = false;
 
+/**
+ * A key for encrypting provider API keys in the runtime's config.json, itself kept encrypted by the
+ * OS keychain (macOS Keychain, Windows DPAPI, libsecret/kwallet on Linux). Returns null where no real
+ * keychain is available (Linux falls back to a hard-coded password, which would protect nothing).
+ */
+function secretKey() {
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    if (process.platform === 'linux' && safeStorage.getSelectedStorageBackend?.() === 'basic_text') return null;
+    const f = path.join(app.getPath('userData'), 'runtime-key.bin');
+    if (fs.existsSync(f)) return safeStorage.decryptString(fs.readFileSync(f));
+    const key = crypto.randomBytes(32).toString('base64');
+    fs.writeFileSync(f, safeStorage.encryptString(key), { mode: 0o600 });
+    return key;
+  } catch (e) {
+    console.warn('Not encrypting API keys at rest:', e.message);
+    return null;
+  }
+}
+
 function startRuntime() {
   return new Promise((resolve, reject) => {
+    const key = secretKey();
     runtime = fork(RUNTIME, ['--name', require('node:os').hostname()], {
       // Electron's own binary runs the runtime as plain Node, so users need no Node install.
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', CREW_HOME: process.env.CREW_HOME || path.join(app.getPath('userData'), 'runtime') },
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: '1',
+        CREW_HOME: process.env.CREW_HOME || path.join(app.getPath('userData'), 'runtime'),
+        ...(key ? { CREW_SECRET_KEY: key } : {}),
+      },
       stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
     });
     runtime.once('message', (m) => m.ready && resolve(m));

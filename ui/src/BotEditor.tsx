@@ -40,7 +40,7 @@ export function BotEditor({ rt, botId, others, onDone, onChat }: { rt: Runtime; 
     setNote('');
     setMemory(null);
     if (!existing) return;
-    fetch(rt.client.fileUrl(existing.id, 'MEMORY.md')).then((r) => (r.ok ? r.text() : '')).then(setMemory, () => setMemory(''));
+    rt.client.text(`/api/bots/${existing.id}/file?path=MEMORY.md`).then((t) => setMemory(t ?? ''), () => setMemory(''));
     rt.client.get(`/api/bots/${existing.id}/files`).then(setFiles, () => setFiles([]));
   }, [botId, rt.client]);
 

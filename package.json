@@ -15,7 +15,7 @@
     "typecheck": "tsc --noEmit -p .",
     "start": "node dist/crew-runtime.mjs",
     "desktop": "electron .",
-    "test": "node --test test/runtime.test.mjs",
+    "test": "node --test test/runtime.test.mjs test/hardening.test.mjs",
     "test:ui": "node test/ui-smoke.mjs",
     "test:desktop": "node test/desktop-smoke.cjs",
     "dist": "npm run build && npx electron-builder",

@@ -1,4 +1,5 @@
 import type { Effort, Provider, Usage } from './types';
+import { resolveKey } from './secrets';
 
 export interface ToolCall {
   id: string;
@@ -80,11 +81,12 @@ const base = (p: Provider) => p.baseUrl.trim().replace(/\/+$/, '');
 const anthropicBase = (p: Provider) => base(p).replace(/\/v1$/, '');
 
 function authHeaders(p: Provider): Record<string, string> {
+  const key = resolveKey(p.apiKey);
   const h: Record<string, string> =
     p.kind === 'anthropic'
-      ? { 'anthropic-version': '2023-06-01', ...(p.apiKey ? { 'x-api-key': p.apiKey } : {}) }
-      : p.apiKey
-        ? { authorization: `Bearer ${p.apiKey}` }
+      ? { 'anthropic-version': '2023-06-01', ...(key ? { 'x-api-key': key } : {}) }
+      : key
+        ? { authorization: `Bearer ${key}` }
         : {};
   return { ...h, ...(p.headers || {}) };
 }

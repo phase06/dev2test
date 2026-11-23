@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -8,6 +9,7 @@ import type { Bot, Provider, Routine, RuntimeInfo, Thread } from './types';
 import { HOME, db, dropMessages, emit, messages, newId, safePath, save, setTeamMemory, subscribe, teamMemory, wsDir } from './store';
 import { detectEngine, removeContainer, sandboxInfo } from './sandbox';
 import { BUILTIN_PRICES, ledger, priceFor } from './pricing';
+import { isEnvRef } from './secrets';
 
 /** A spending limit from the UI: a positive number of USD, or '' / 0 / null to remove it. */
 const limitFrom = (v: unknown, old?: number) => (v === undefined ? old : Number(v) > 0 ? Math.round(Number(v) * 100) / 100 : undefined);
@@ -80,6 +82,10 @@ function botFrom(body: any, old?: Bot): Bot {
 const changed = (what: 'bots' | 'threads' | 'routines' | 'config') => emit({ type: 'changed', what });
 
 // ---- Runtime ----
+// Short-lived, read-only tickets for the two URLs a browser can't attach a header to: the event
+// stream (EventSource) and workspace files shown as <img>/<a>. The real token stays in headers.
+on('POST', '/api/ticket', () => issueTicket());
+
 on('GET', '/api/info', async (): Promise<RuntimeInfo> => (await detectEngine(), {
   name: db.config.name,
   version: VERSION,
@@ -93,12 +99,14 @@ on('GET', '/api/status', () => snapshot());
 
 on('GET', '/api/config', () => ({
   name: db.config.name,
-  providers: db.config.providers.map(({ apiKey, ...p }) => ({ ...p, apiKey: '', hasKey: !!apiKey })),
+  // Keys never leave the runtime; an env: reference is not a secret, so it is shown.
+  providers: db.config.providers.map(({ apiKey, ...p }) => ({ ...p, apiKey: isEnvRef(apiKey) ? apiKey : '', hasKey: !!apiKey })),
   mcpServers: db.config.mcpServers,
   connections: db.config.connections,
   sandbox: db.config.sandbox,
   contextTokens: db.config.contextTokens,
   monthlyLimit: db.config.monthlyLimit,
+  allowedOrigins: db.config.allowedOrigins,
 }));
 // Spending this month, plus which teammates' models have no price (so their spending can't be limited).
 on('GET', '/api/spend', () => {
@@ -118,6 +126,8 @@ on('PUT', '/api/config', async ({ body }) => {
   if (Array.isArray(body.connections)) db.config.connections = body.connections;
   if (Number(body.contextTokens) >= 100) db.config.contextTokens = Math.round(Number(body.contextTokens));
   if ('monthlyLimit' in body) db.config.monthlyLimit = limitFrom(body.monthlyLimit);
+  if (Array.isArray(body.allowedOrigins))
+    db.config.allowedOrigins = body.allowedOrigins.map((o: unknown) => String(o).trim().replace(/\/+$/, '')).filter((o: string) => /^https?:\/\/[^/]+$/.test(o));
   if (body.sandbox && typeof body.sandbox === 'object')
     db.config.sandbox = {
       image: String(body.sandbox.image || '').trim() || db.config.sandbox.image,
@@ -278,11 +288,40 @@ on('POST', '/api/routines/:id/run', ({ params }) => ({
 }));
 
 // ---- HTTP plumbing ----
+const sameSecret = (given: string, real: string) =>
+  crypto.timingSafeEqual(crypto.createHash('sha256').update(given).digest(), crypto.createHash('sha256').update(real).digest());
+
+const TICKET_SECRET = crypto.randomBytes(32); // per process: tickets die with a restart
+const TICKET_TTL = 15 * 60 * 1000;
+const TICKET_PATHS = /^\/api\/(events|bots\/[^/]+\/file)$/;
+const sign = (exp: string) => crypto.createHmac('sha256', TICKET_SECRET).update(exp).digest('base64url');
+export function issueTicket() {
+  const expires = Date.now() + TICKET_TTL;
+  return { ticket: `${expires}.${sign(String(expires))}`, expires };
+}
+function ticketValid(t: string | null) {
+  const [exp, mac] = (t ?? '').split('.');
+  return !!exp && !!mac && Number(exp) > Date.now() && sameSecret(mac, sign(exp));
+}
+
+/** The bearer token in the Authorization header, or a ticket for one of the read-only ticket URLs. */
 function authed(req: http.IncomingMessage, url: URL) {
-  const given = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || url.searchParams.get('token') || '';
-  const a = crypto.createHash('sha256').update(given).digest();
-  const b = crypto.createHash('sha256').update(db.config.token).digest();
-  return crypto.timingSafeEqual(a, b);
+  const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (bearer) return sameSecret(bearer, db.config.token);
+  return req.method === 'GET' && TICKET_PATHS.test(url.pathname) && ticketValid(url.searchParams.get('ticket'));
+}
+
+const LOOPBACK = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/;
+/** Browser origins allowed to call the API: this runtime's own, loopback (the desktop app), and configured ones. */
+function originAllowed(origin: string, host: string | undefined) {
+  if (LOOPBACK.test(origin)) return true;
+  try {
+    if (host && new URL(origin).host === host) return true;
+  } catch {
+    return false;
+  }
+  const extra = [...db.config.allowedOrigins, ...(process.env.CREW_ALLOWED_ORIGINS ?? '').split(',')].map((o) => o.trim().replace(/\/+$/, '')).filter(Boolean);
+  return extra.includes(origin);
 }
 
 function readBody(req: http.IncomingMessage): Promise<any> {
@@ -314,16 +353,32 @@ function serveStatic(url: URL, res: http.ServerResponse) {
   fs.createReadStream(f).pipe(res);
 }
 
-export function createServer() {
-  return http.createServer(async (req, res) => {
+export function createServer(tls?: { cert: Buffer; key: Buffer }) {
+  return tls ? https.createServer(tls, handle) : http.createServer(handle);
+}
+
+async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     const url = new URL(req.url || '/', 'http://x');
-    // Auth is a bearer token (never cookies), so any origin may call the API: this is what lets a
-    // desktop app served from the local runtime talk to runtimes on other machines.
-    res.setHeader('access-control-allow-origin', '*');
-    res.setHeader('access-control-allow-headers', 'authorization, content-type');
-    res.setHeader('access-control-allow-methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('x-content-type-options', 'nosniff');
+    res.setHeader('referrer-policy', 'no-referrer');
+    if (!url.pathname.startsWith('/api/')) {
+      res.setHeader('x-frame-options', 'DENY');
+      return serveStatic(url, res);
+    }
+    // CORS: only allowed origins get the headers a browser needs to read responses, and requests
+    // from any other origin are refused outright (non-browser clients send no Origin and are unaffected).
+    const origin = req.headers.origin;
+    if (origin) {
+      if (!originAllowed(origin, req.headers.host)) {
+        res.writeHead(403, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ error: `Origin ${origin} is not allowed. Add it with --allow-origin or CREW_ALLOWED_ORIGINS.` }));
+      }
+      res.setHeader('access-control-allow-origin', origin);
+      res.setHeader('vary', 'Origin');
+      res.setHeader('access-control-allow-headers', 'authorization, content-type');
+      res.setHeader('access-control-allow-methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    }
     if (req.method === 'OPTIONS') return res.writeHead(204).end();
-    if (!url.pathname.startsWith('/api/')) return serveStatic(url, res);
 
     const json = (status: number, data: unknown) => {
       res.writeHead(status, { 'content-type': 'application/json' });
@@ -354,5 +409,4 @@ export function createServer() {
     } catch (e: any) {
       if (!res.headersSent) json(e instanceof HttpError ? e.status : 500, { error: e?.message || String(e) });
     }
-  });
 }
