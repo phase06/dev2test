@@ -20,6 +20,8 @@ export interface Tool {
   def: ToolDef;
   /** Risky tools need approval under the "ask" policy and are removed under "readonly". */
   risky?: boolean;
+  /** Output comes from outside (web, browser, connectors) and may carry injected instructions. */
+  untrusted?: boolean;
   run: (args: any, ctx: ToolCtx) => Promise<string | ToolOutput>;
 }
 /** Tool output with images: workspace-relative paths of image files the model should see. */
@@ -280,6 +282,7 @@ const saveRoutine: Tool = {
 };
 
 const webFetch: Tool = {
+  untrusted: true,
   def: {
     name: 'web_fetch',
     description: 'Fetch a URL and return its content as text (HTML is converted to plain text).',
@@ -298,6 +301,7 @@ const webFetch: Tool = {
 };
 
 const browser: Tool = {
+  untrusted: true,
   def: {
     name: 'browser',
     description:
@@ -371,6 +375,7 @@ export function toolsFor(bot: Bot, depth: number): Tool[] {
         for (const mt of c.tools)
           t.push({
             risky: true,
+            untrusted: true,
             def: {
               name: `mcp__${c.cfg.name}__${mt.name}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64),
               description: mt.description || mt.name,

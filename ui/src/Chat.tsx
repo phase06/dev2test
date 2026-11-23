@@ -55,11 +55,21 @@ function ToolCard({ part, rt, botId }: { part: ToolPart; rt: Runtime; botId?: st
           <img className="shot" src={rt.client.fileUrl(botId, p)} alt={`Image from ${part.name}: ${p}`} />
         </a>
       ))}
+      {asking && part.guard && (
+        <div className="guard-note">
+          This conversation contains content from outside (a web page, the browser or a connector), which could carry instructions
+          planted for the teammate. Check this action is something you asked for.
+        </div>
+      )}
       {asking && (
         <div className="approve">
           <button className="btn primary sm" onClick={() => decide('approve')}>Approve</button>
           <button className="btn sm" onClick={() => decide('deny')}>Deny</button>
-          <button className="btn ghost sm" onClick={() => decide('always')} title="Switch this teammate to the Autonomous policy">Always allow for this teammate</button>
+          {part.guard ? (
+            <button className="btn ghost sm" onClick={() => decide('conversation')} title="Stop asking because of outside content in this conversation">Allow for this conversation</button>
+          ) : (
+            <button className="btn ghost sm" onClick={() => decide('always')} title="Switch this teammate to the Autonomous policy">Always allow for this teammate</button>
+          )}
         </div>
       )}
     </div>
@@ -189,6 +199,11 @@ export function Chat({ rt, thread, onEditBot }: { rt: Runtime; thread: Thread; o
         <div className="chat-title">
           <h1>{thread.title}</h1>
           <span>{kind} · runs on {rt.info?.name ?? rt.conn.name}</span>
+          {thread.untrustedSince && (
+            <span className="badge" title={`Since ${new Date(thread.untrustedSince).toLocaleString()}. Teammates ask before acting on it${thread.guardOff ? ' (turned off for this conversation)' : ''}.`}>
+              Contains web content{thread.guardOff ? ' · checks off' : ''}
+            </span>
+          )}
         </div>
         <div className="members">
           {members.map((b) => (

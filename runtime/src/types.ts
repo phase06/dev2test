@@ -97,6 +97,11 @@ export interface Bot {
   effort?: Effort;
   /** Monthly spending limit for this teammate, USD. Unset: no limit. */
   monthlyLimit?: number;
+  /**
+   * Once a conversation contains untrusted content (web pages, browser, connector output), ask before
+   * actions that change things or persist. Default on.
+   */
+  guard?: boolean;
   /** Where shell commands run: on the runtime host, or in this bot's own container. */
   isolation: 'host' | 'container';
   tools: BotTools;
@@ -113,6 +118,10 @@ export interface Thread {
   hops: number;
   /** Rolling summary of the first `count` messages, which are no longer replayed to the models. */
   summary?: { text: string; count: number };
+  /** When untrusted content (web, browser, connector output) first entered this conversation. */
+  untrustedSince?: number;
+  /** The user chose "Allow for this conversation" on an untrusted-content approval. */
+  guardOff?: boolean;
 }
 
 export type ToolStatus = 'pending' | 'approval' | 'running' | 'done' | 'error' | 'denied';
@@ -121,7 +130,20 @@ export type Part =
   | { type: 'text'; text: string }
   /** A progress note the model wrote between tool calls (shown to the user, not replayed as text). */
   | { type: 'note'; text: string }
-  | { type: 'tool'; id: string; name: string; args: string; result?: string; status: ToolStatus; approvalId?: string; images?: string[] };
+  | {
+      type: 'tool';
+      id: string;
+      name: string;
+      args: string;
+      result?: string;
+      status: ToolStatus;
+      approvalId?: string;
+      images?: string[];
+      /** The result came from outside (web, browser, connector): sent to the model as untrusted data. */
+      untrusted?: boolean;
+      /** Approval was required because the conversation contains untrusted content. */
+      guard?: boolean;
+    };
 
 export interface Message {
   id: string;

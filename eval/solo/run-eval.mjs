@@ -257,6 +257,9 @@ async function runCase(input, ctx) {
       name: tpl.name, role: tpl.role, instructions: tpl.instructions,
       providerId: 'p', model: ctx.model, policy: 'auto', isolation: ctx.isolation, ...(ctx.effort ? { effort: ctx.effort } : {}),
       tools: { shell: true, files: true, web: true, browser: false, mcp: false, ...tpl.tools, ...input.tools, team: false, teamMemory: false },
+      // Nobody can approve during an eval, and each case runs in a throwaway workspace, so the
+      // outside-content check (which pauses for approval) is off. Its behaviour is covered by npm test.
+      guard: false,
     });
     env.botId = bot.id;
     env.ws = join(env.home, 'workspaces', bot.id);

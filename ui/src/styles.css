@@ -173,6 +173,10 @@ textarea { resize: vertical; line-height: 1.45; }
 .price-row { display: grid; grid-template-columns: 1fr 110px 110px; gap: 8px; align-items: center; }
 .price-row.head { font-size: 12px; color: var(--muted); font-weight: 600; }
 .price-row code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.guard-note { padding: 8px 12px; border-top: 1px solid var(--line); font-size: 13px; color: var(--warn); }
+.badge { margin-left: 8px; font-size: 11px; padding: 1px 7px; border-radius: 99px; background: var(--accent-soft); color: var(--warn); white-space: nowrap; }
+.guard-check { align-items: flex-start; margin-top: 14px; max-width: 72ch; }
+.guard-check input { margin-top: 3px; }
 .progress-note { color: var(--muted); font-size: 13px; font-style: italic; margin: 4px 0; padding-left: 10px; border-left: 2px solid var(--line); white-space: pre-wrap; }
 .typing { display: flex; gap: 4px; padding: 6px 0; } .typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: pulse 1.2s infinite; } .typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
 .empty-chat { max-width: 380px; margin: 14vh auto 0; text-align: center; color: var(--muted); display: flex; flex-direction: column; align-items: center; gap: 12px; }

@@ -168,6 +168,17 @@ export function BotEditor({ rt, botId, others, onDone, onChat }: { rt: Runtime; 
       </section>
 
       <section>
+        <label className="check guard-check">
+          <input type="checkbox" checked={d.guard !== false} onChange={(e) => set({ guard: e.target.checked })} />
+          <span>
+            <strong>Ask before acting on outside content.</strong> Once a conversation includes a web page, browser output or connector
+            results, ask before commands, file changes, connector calls, memory, routines or delegation — even when Autonomous.
+            Protects against instructions hidden in that content.
+          </span>
+        </label>
+      </section>
+
+      <section>
         <h3>Where it runs</h3>
         <div className="radio-cards two">
           <label className={d.isolation === 'container' ? 'on' : ''}>

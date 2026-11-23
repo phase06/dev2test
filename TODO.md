@@ -49,9 +49,11 @@ Last reviewed: 2026-11-20.
       and no plain HTTP off loopback, `env:` key references, keys encrypted at rest on desktop.
 - [ ] Remaining: the runtime access token is plain text in config.json; one token, no users/roles;
       no token rotation command.
-- [ ] **Prompt-injection defence.** Fetched pages and files can carry instructions to an autonomous
-      teammate with a shell. Mark fetched content as untrusted; consider requiring approval for risky
-      tools right after reading web content.
+- [x] Prompt-injection defence: untrusted wrapping of web/browser/connector output, and approval for
+      acting after it (per conversation; per-teammate setting).
+- [ ] Remaining: content fetched via the shell (curl, git clone) or read from downloaded files isn't
+      marked untrusted; a summary of untrusted content loses the wrapper; unattended routines that read
+      the web will wait for approval unless the check is turned off for that teammate.
 - [ ] **Run history / audit log** per teammate: what ran, when, and what it cost.
 
 ## Spending limits: known limits

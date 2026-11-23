@@ -73,6 +73,7 @@ function botFrom(body: any, old?: Bot): Bot {
     // '' clears the setting back to the model's default
     effort: body.effort === '' ? undefined : EFFORTS.includes(body.effort) ? body.effort : old?.effort,
     monthlyLimit: limitFrom(body.monthlyLimit, old?.monthlyLimit),
+    guard: typeof body.guard === 'boolean' ? body.guard : old?.guard ?? true,
     isolation: ['host', 'container'].includes(body.isolation) ? body.isolation : old?.isolation || (sandboxInfo().available ? 'container' : 'host'),
     tools: { shell: true, files: true, web: true, browser: false, mcp: true, team: true, teamMemory: false, ...(old?.tools || {}), ...(body.tools || {}) },
     createdAt: old?.createdAt || Date.now(),
@@ -247,7 +248,10 @@ on('POST', '/api/threads/:id/messages', ({ params, body }) => {
   return postMessage(thread(params[0]), { type: 'user', name: 'You' }, text);
 });
 on('POST', '/api/threads/:id/stop', ({ params }) => (stopThread(params[0]), { ok: true }));
-on('POST', '/api/approvals/:id', ({ params, body }) => ({ ok: resolveApproval(params[0], body.decision) }));
+on('POST', '/api/approvals/:id', ({ params, body }) => {
+  if (!['approve', 'deny', 'always', 'conversation'].includes(body.decision)) throw new HttpError(400, 'Unknown decision');
+  return { ok: resolveApproval(params[0], body.decision) };
+});
 
 // ---- Routines ----
 on('GET', '/api/routines', () => db.routines);

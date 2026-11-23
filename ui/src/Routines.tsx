@@ -53,6 +53,9 @@ function RoutineModal({ rt, initial, onClose }: { rt: Runtime; initial: Routine 
         </Field>
       </div>
       {r.cron && bot?.policy === 'ask' && <div className="note">{bot.name} is set to “Ask first”, so scheduled runs will pause until you approve each action. Switch it to Autonomous for unattended runs.</div>}
+      {r.cron && bot && bot.guard !== false && bot.policy !== 'ask' && bot.tools.web && (
+        <div className="note">If this routine reads web pages or connector output, {bot.name} will then ask before running commands or changing files, and the run waits for you. Turn off “Ask before acting on outside content” in {bot.name}'s profile only if its sources are trusted.</div>
+      )}
       {err && <div className="note error">{err}</div>}
       <footer className="page-foot"><button className="btn primary" onClick={saveIt} disabled={!r.name || !r.prompt || !r.botId}>Save routine</button></footer>
     </Modal>
