@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import type { Bot, Config, Message, Routine, ServerEvent, Thread } from './types';
+import type { Bot, Config, Ledger, Message, Routine, ServerEvent, Thread } from './types';
 
 export const HOME = path.resolve(process.env.CREW_HOME || path.join(os.homedir(), '.crew'));
 fs.mkdirSync(path.join(HOME, 'messages'), { recursive: true });
@@ -32,6 +32,7 @@ export const db = {
   bots: load<Bot[]>('bots.json', []),
   threads: load<Thread[]>('threads.json', []),
   routines: load<Routine[]>('routines.json', []),
+  spend: load<Ledger | null>('spend.json', null) as Ledger,
 };
 
 if (!db.config) {
@@ -71,7 +72,7 @@ export function dropMessages(threadId: string) {
   fs.rmSync(file(`messages/${threadId}.json`), { force: true });
 }
 
-type Saveable = 'config' | 'bots' | 'threads' | 'routines' | `messages/${string}`;
+type Saveable = 'config' | 'bots' | 'threads' | 'routines' | 'spend' | `messages/${string}`;
 const dirty = new Set<Saveable>();
 let timer: NodeJS.Timeout | undefined;
 

@@ -42,6 +42,26 @@ Last reviewed: 2026-11-20.
       GitHub access refuses branch deletion; do it from the PR page or locally).
 - [ ] Consider enabling "Automatically delete head branches" in repo settings.
 
+## Next up (proposed 2026-11-23)
+
+- [x] Spending limits: runtime, teammate and routine monthly limits; cost per reply (branch `spending-limits`).
+- [ ] **Harden remote runtimes.** The access token appears in URLs (file links, the event stream) and
+      can end up in logs; the API accepts requests from any origin; traffic is plain HTTP unless
+      tunnelled; provider API keys sit in a plain-text config file. Fix: short-lived signed URLs,
+      an origin allowlist, the OS keychain on desktop, a documented TLS setup.
+- [ ] **Prompt-injection defence.** Fetched pages and files can carry instructions to an autonomous
+      teammate with a shell. Mark fetched content as untrusted; consider requiring approval for risky
+      tools right after reading web content.
+- [ ] **Run history / audit log** per teammate: what ran, when, and what it cost.
+
+## Spending limits: known limits
+
+- [ ] Costs are estimates from reported tokens × prices; the built-in Claude table (2026-11) will drift.
+      Haiku 5.5's higher price above 100K-token prompts isn't modelled.
+- [ ] Calls from providers that report no usage are counted as "not metered" and escape the limits.
+- [ ] A fallback reply is priced at the model that produced the final message, though usage covers
+      every attempt.
+
 ## Harness gaps (not started)
 
 - [ ] Run independent tool calls in parallel (currently sequential).

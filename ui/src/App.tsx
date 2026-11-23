@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Client, useRuntime, type Bot, type Conn, type Runtime, type Thread, type UiConfig } from './api';
+import { Client, usd, useRuntime, type Bot, type Conn, type Runtime, type Thread, type UiConfig } from './api';
 import { Chat } from './Chat';
 import { BotEditor } from './BotEditor';
 import { Settings } from './Settings';
@@ -201,6 +201,10 @@ function Home({ rt, go, openDm }: { rt: Runtime; go: (v: View) => void; openDm: 
                 <dt>Model</dt><dd>{prov ? `${b.model || '—'} · ${prov.name}` : 'No provider'}</dd>
                 <dt>Autonomy</dt><dd>{{ ask: 'Asks first', auto: 'Autonomous', readonly: 'Read-only' }[b.policy]}</dd>
                 <dt>Runs in</dt><dd>{b.isolation === 'container' ? 'Own container' : 'Host'}</dd>
+                <dt>This month</dt>
+                <dd className={b.monthlyLimit && (rt.spend?.bots[b.id] ?? 0) >= b.monthlyLimit * 0.8 ? 'approval' : ''}>
+                  {rt.spend?.unpricedBots.includes(b.id) ? 'Not tracked (no price for this model)' : `${usd(rt.spend?.bots[b.id] ?? 0)}${b.monthlyLimit ? ` of ${usd(b.monthlyLimit)}` : ''}`}
+                </dd>
               </dl>
               <div className="card-actions"><button className="btn primary sm" onClick={() => openDm(b)}>Message</button><button className="btn sm" onClick={() => go({ type: 'bot', id: b.id })}>Profile</button></div>
             </div>

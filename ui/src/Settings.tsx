@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Client, PRESETS, type Conn, type McpServerCfg, type Provider, type Runtime } from './api';
+import { Client, PRESETS, usd, type Conn, type McpServerCfg, type Price, type Provider, type Runtime } from './api';
 import { Field, Icon, Modal } from './ui';
 
 function ProviderModal({ rt, initial, onClose }: { rt: Runtime; initial: Provider | null; onClose: () => void }) {
@@ -8,7 +8,25 @@ function ProviderModal({ rt, initial, onClose }: { rt: Runtime; initial: Provide
   const [models, setModels] = useState(p.models.join(', '));
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState('');
-  const current = (): Provider => ({ ...p, models: models.split(',').map((s) => s.trim()).filter(Boolean) });
+  const modelList = models.split(',').map((s) => s.trim()).filter(Boolean);
+  const [builtin, setBuiltin] = useState<Record<string, Price>>({});
+  useEffect(() => {
+    rt.client.get<Record<string, Price>>('/api/prices').then(setBuiltin, () => {});
+  }, [rt.client]);
+  const known = (m: string) => builtin[m.split('/').pop()!.replace(/^anthropic\./, '')];
+  const setPrice = (m: string, k: 'input' | 'output', v: string) => {
+    const prices = { ...(p.prices ?? {}) };
+    const cur = prices[m] ?? { input: NaN, output: NaN };
+    const next = { ...cur, [k]: v === '' ? NaN : Number(v) };
+    if (Number.isNaN(next.input) && Number.isNaN(next.output)) delete prices[m];
+    else prices[m] = next;
+    setP({ ...p, prices });
+  };
+  const current = (): Provider => {
+    // Keep only complete prices for models still listed.
+    const prices = Object.fromEntries(Object.entries(p.prices ?? {}).filter(([m, v]) => modelList.includes(m) && v.input >= 0 && v.output >= 0));
+    return { ...p, models: modelList, prices };
+  };
 
   const run = async (label: string, fn: () => Promise<string>) => {
     setBusy(label);
@@ -67,6 +85,22 @@ function ProviderModal({ rt, initial, onClose }: { rt: Runtime; initial: Provide
       <Field label="Models" hint="Comma-separated model ids offered when configuring a teammate.">
         <textarea rows={2} value={models} onChange={(e) => setModels(e.target.value)} placeholder="model-id-1, model-id-2" />
       </Field>
+      {modelList.length > 0 && (
+        <div className="prices">
+          <span className="field-label">Prices, USD per million tokens</span>
+          <span className="field-hint">Used for spending limits. Leave empty to use the built-in price (shown greyed out) where there is one; models without any price aren't counted.</span>
+          <div className="price-row head"><span>Model</span><span>Input</span><span>Output</span></div>
+          {modelList.map((m) => (
+            <div className="price-row" key={m}>
+              <code>{m}</code>
+              <input type="number" min={0} step="any" aria-label={`${m} input price`} placeholder={known(m) ? `${known(m).input} in` : 'input'}
+                value={Number.isNaN(p.prices?.[m]?.input ?? NaN) ? '' : p.prices![m].input} onChange={(e) => setPrice(m, 'input', e.target.value)} />
+              <input type="number" min={0} step="any" aria-label={`${m} output price`} placeholder={known(m) ? `${known(m).output} out` : 'output'}
+                value={Number.isNaN(p.prices?.[m]?.output ?? NaN) ? '' : p.prices![m].output} onChange={(e) => setPrice(m, 'output', e.target.value)} />
+            </div>
+          ))}
+        </div>
+      )}
       <label className="check"><input type="checkbox" checked={p.stream !== false} onChange={(e) => setP({ ...p, stream: e.target.checked })} /> Stream responses <small>(turn off for gateways with broken tool-call streaming)</small></label>
       {p.kind === 'anthropic' && (
         <label className="check">
@@ -123,6 +157,8 @@ export function Settings({ rt, remotes, saveRemotes, homeId }: { rt: Runtime; re
   const [sbNote, setSbNote] = useState('');
   const [budget, setBudget] = useState(String(rt.config?.contextTokens ?? ''));
   const [budgetNote, setBudgetNote] = useState('');
+  const [limit, setLimit] = useState(String(rt.config?.monthlyLimit ?? ''));
+  const [limitNote, setLimitNote] = useState('');
   useEffect(() => {
     setMcp(rt.config?.mcpServers ?? []);
     setName(rt.info?.name ?? '');
@@ -182,6 +218,30 @@ export function Settings({ rt, remotes, saveRemotes, homeId }: { rt: Runtime; re
           <Field label="Name of this runtime">
             <input value={name} onChange={(e) => setName(e.target.value)} onBlur={() => name.trim() && name !== rt.info?.name && rt.client.put('/api/config', { name }).then(rt.reload)} />
           </Field>
+        </div>
+      </section>
+
+      <section>
+        <h3>Spending</h3>
+        <p className="lede">
+          This month on “{rt.info?.name}”: <strong>{usd(rt.spend?.total ?? 0)}</strong>
+          {rt.config.monthlyLimit ? ` of a ${usd(rt.config.monthlyLimit)} limit` : ''}. Costs are estimated from token counts and the prices set on each provider.
+          Teammates and routines can have their own limits too.
+        </p>
+        {rt.spend && Object.keys(rt.spend.unpriced).length > 0 && (
+          <div className="note">Not counted this month (no price set): {Object.keys(rt.spend.unpriced).join(', ')}. Add prices in the provider to include them.</div>
+        )}
+        {rt.spend?.unmetered && Object.keys(rt.spend.unmetered).length > 0 && (
+          <div className="note">Not counted this month (the provider reported no token usage): {Object.keys(rt.spend.unmetered).join(', ')}. Limits can't see these calls.</div>
+        )}
+        <div className="grid2">
+          <Field label="Monthly limit for this runtime (USD)" hint="Every teammate stops at this total until next month. Leave empty for no limit.">
+            <input type="number" min={0} step={1} value={limit} placeholder="No limit" onChange={(e) => setLimit(e.target.value)} />
+          </Field>
+        </div>
+        <div className="page-foot">
+          <button className="btn sm primary" onClick={() => rt.client.put('/api/config', { monthlyLimit: limit === '' ? null : Number(limit) }).then(() => (setLimitNote('Saved.'), rt.reload()), (e) => setLimitNote(e.message))}>Save spending limit</button>
+          <small>{limitNote}</small>
         </div>
       </section>
 
