@@ -767,3 +767,64 @@ test('approval decisions are validated', async () => {
   const r = await fetch(`${base}/api/approvals/nope`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'yolo' }) });
   assert.equal(r.status, 400);
 });
+
+// ---------- run history and change log ----------
+test('history: each run is recorded with trigger, outcome, tools, approvals and cost', async () => {
+  const bot = await api('POST', '/api/bots', { name: 'Hal', providerId: 'mock', model: 'mock-large', policy: 'ask', isolation: 'host' });
+  const t = await api('POST', '/api/threads', { members: [bot.id] });
+  await api('POST', `/api/threads/${t.id}/messages`, { text: 'write a note' });
+  const ask = await until(async () => (await msgs(t.id)).at(-1).parts.find((p) => p.status === 'approval'), 'approval');
+  await api('POST', `/api/approvals/${ask.approvalId}`, { decision: 'deny' });
+  const reply = await until(async () => { const m = (await msgs(t.id)).at(-1); return m.status === 'done' && m; }, 'run end');
+  const runs = await until(async () => { const r = await api('GET', `/api/history?type=run&bot=${bot.id}`); return r.length && r; }, 'history row');
+  const r = runs[0];
+  assert.equal(r.id, reply.id);
+  assert.equal(r.trigger, 'user');
+  assert.equal(r.status, 'done');
+  assert.equal(r.threadTitle, 'Hal');
+  assert.deepEqual(r.tools, [{ name: 'write_file', args: JSON.stringify({ path: 'note.txt', content: 'hi from Hal' }), status: 'denied', decision: 'deny' }]);
+  assert.ok(near(r.cost, 2 * CALL), `cost ${r.cost}`);
+  assert.ok(r.end >= r.ts);
+  assert.ok(runs.every((x) => x.botId === bot.id), 'filtered by teammate');
+});
+
+test('history: routine, delegated and limited runs are labelled', async () => {
+  const all = await api('GET', '/api/history?type=run&limit=1000');
+  assert.ok(all.some((r) => r.trigger === 'routine' && r.routineName === 'Hourly'));
+  assert.ok(all.some((r) => r.trigger === 'teammate' && r.threadKind === 'internal'));
+  assert.ok(all.some((r) => r.status === 'limited'));
+  assert.ok(all.some((r) => r.status === 'declined'));
+  assert.ok(all.some((r) => r.untrusted && r.tools.some((x) => x.untrusted && x.name === 'web_fetch')));
+  for (let i = 1; i < all.length; i++) assert.ok(all[i - 1].ts >= all[i].ts, 'newest first');
+});
+
+test('history: settings changes are logged, with values only for security-relevant fields and never keys', async () => {
+  const bot = await api('POST', '/api/bots', { name: 'Cal', providerId: 'mock', model: 'mock-large', policy: 'ask', isolation: 'host', instructions: 'secret plan' });
+  await api('PUT', `/api/bots/${bot.id}`, { policy: 'auto', instructions: 'a new secret plan', monthlyLimit: 5 });
+  const cfg = await api('GET', '/api/config');
+  await api('PUT', '/api/config', { providers: cfg.providers.map((p) => (p.id === 'mock' ? { ...p, apiKey: 'sk-rotated-999' } : p)) });
+  await api('DELETE', `/api/bots/${bot.id}`);
+  const changes = await api('GET', '/api/history?type=change&limit=20');
+  const upd = changes.find((c) => c.action === 'bot.update' && c.target === 'Cal');
+  assert.deepEqual(upd.fields.policy, ['ask', 'auto']);
+  assert.deepEqual(upd.fields.monthlyLimit, [null, 5]);
+  assert.equal(upd.fields.instructions, 'changed', 'free text is noted, not copied');
+  assert.ok(changes.some((c) => c.action === 'bot.create' && c.target === 'Cal'));
+  assert.ok(changes.some((c) => c.action === 'bot.delete' && c.target === 'Cal'));
+  const key = changes.find((c) => c.action === 'config.update' && c.fields.apiKeyChanged);
+  assert.deepEqual(key.fields.apiKeyChanged, ['Mock']);
+  const raw = fs.readdirSync(path.join(home, 'history')).map((f) => fs.readFileSync(path.join(home, 'history', f), 'utf8')).join('');
+  assert.doesNotMatch(raw, /sk-rotated-999|sk-secret|secret plan/);
+});
+
+test('history: a month can be exported, and the files are append-only JSON lines', async () => {
+  const month = new Date().toISOString().slice(0, 7);
+  const r = await fetch(`${base}/api/history/${month}`, { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(r.status, 200);
+  assert.match(r.headers.get('content-disposition'), /crew-history-\d{4}-\d{2}\.jsonl/);
+  const lines = (await r.text()).trim().split('\n');
+  assert.ok(lines.length > 10);
+  lines.forEach((l) => assert.ok(['run', 'change'].includes(JSON.parse(l).type)));
+  assert.equal((await fetch(`${base}/api/history/1999-01`, { headers: { authorization: `Bearer ${token}` } })).status, 404);
+  assert.equal((await fetch(`${base}/api/history/..%2Fconfig`, { headers: { authorization: `Bearer ${token}` } })).status, 404);
+});

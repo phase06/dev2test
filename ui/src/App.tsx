@@ -4,9 +4,10 @@ import { Chat } from './Chat';
 import { BotEditor } from './BotEditor';
 import { Settings } from './Settings';
 import { Routines } from './Routines';
+import { History } from './History';
 import { Avatar, Field, Icon, Modal } from './ui';
 
-type View = { type: 'home' } | { type: 'thread'; id: string } | { type: 'bot'; id: string | null } | { type: 'routines' } | { type: 'settings' };
+type View = { type: 'home' } | { type: 'thread'; id: string } | { type: 'bot'; id: string | null } | { type: 'routines' } | { type: 'history' } | { type: 'settings' };
 
 const ls = {
   get: (k: string) => { try { return localStorage.getItem(k); } catch { return null; } },
@@ -132,6 +133,7 @@ function Shell({ token, onBadToken }: { token: string; onBadToken: () => void })
         <nav className="side-nav">
           <button className={view.type === 'home' ? 'on' : ''} onClick={() => setView({ type: 'home' })}><Icon name="users" /> Team{waiting > 0 && <b>{waiting}</b>}</button>
           <button className={view.type === 'routines' ? 'on' : ''} onClick={() => setView({ type: 'routines' })}><Icon name="clock" /> Routines</button>
+          <button className={view.type === 'history' ? 'on' : ''} onClick={() => setView({ type: 'history' })}><Icon name="list" /> History</button>
           <button className={view.type === 'settings' ? 'on' : ''} onClick={() => setView({ type: 'settings' })}><Icon name="gear" /> Settings</button>
         </nav>
       </aside>
@@ -141,6 +143,7 @@ function Shell({ token, onBadToken }: { token: string; onBadToken: () => void })
         {view.type === 'thread' && thread ? <Chat rt={rt} thread={thread} onEditBot={(id) => setView({ type: 'bot', id })} />
           : view.type === 'bot' ? <BotEditor rt={rt} botId={view.id} others={conns.filter((c) => c.id !== conn.id)} onDone={() => setView({ type: 'home' })} onChat={(b) => void openDm(b)} />
           : view.type === 'routines' ? <Routines rt={rt} onOpenThread={async (id) => { await rt.reload(); setView({ type: 'thread', id }); }} />
+          : view.type === 'history' ? <History rt={rt} onOpenThread={(id) => setView({ type: 'thread', id })} />
           : view.type === 'settings' ? <Settings rt={rt} remotes={remotes} saveRemotes={saveRemotes} homeId="home" />
           : <Home rt={rt} go={setView} openDm={openDm} />}
       </main>

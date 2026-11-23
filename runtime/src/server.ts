@@ -10,6 +10,11 @@ import { HOME, db, dropMessages, emit, messages, newId, safePath, save, setTeamM
 import { detectEngine, removeContainer, sandboxInfo } from './sandbox';
 import { BUILTIN_PRICES, ledger, priceFor } from './pricing';
 import { isEnvRef } from './secrets';
+import { botFields, diff, exportPath, query, record } from './history';
+
+const logChange = (action: string, target: string | undefined, fields: Record<string, unknown>) => {
+  if (Object.keys(fields).length || action.endsWith('.create') || action.endsWith('.delete')) record({ type: 'change', ts: Date.now(), action, target, fields });
+};
 
 /** A spending limit from the UI: a positive number of USD, or '' / 0 / null to remove it. */
 const limitFrom = (v: unknown, old?: number) => (v === undefined ? old : Number(v) > 0 ? Math.round(Number(v) * 100) / 100 : undefined);
@@ -118,9 +123,30 @@ on('GET', '/api/spend', () => {
   return { ...l, monthlyLimit: db.config.monthlyLimit, unpricedBots };
 });
 on('GET', '/api/prices', () => BUILTIN_PRICES);
+on('GET', '/api/history', ({ url }) => {
+  const type = url.searchParams.get('type');
+  return query({
+    type: type === 'run' || type === 'change' ? type : undefined,
+    botId: url.searchParams.get('bot') || undefined,
+    before: Number(url.searchParams.get('before')) || undefined,
+    limit: Math.min(Math.max(Number(url.searchParams.get('limit')) || 100, 1), 1000),
+  });
+});
+on('GET', '/api/history/:month', ({ params, res }) => {
+  const f = exportPath(params[0]);
+  if (!f) throw new HttpError(404, 'No history for that month');
+  res.writeHead(200, { 'content-type': 'application/x-ndjson', 'content-disposition': `attachment; filename="crew-history-${params[0]}.jsonl"` });
+  fs.createReadStream(f).pipe(res);
+  return undefined;
+});
 on('GET', '/api/team-memory', () => ({ text: teamMemory() }));
-on('PUT', '/api/team-memory', ({ body }) => (setTeamMemory(String(body.text ?? '')), { ok: true }));
+on('PUT', '/api/team-memory', ({ body }) => {
+  setTeamMemory(String(body.text ?? ''));
+  logChange('team-memory.update', undefined, { text: 'changed' });
+  return { ok: true };
+});
 on('PUT', '/api/config', async ({ body }) => {
+  const before = JSON.parse(JSON.stringify({ ...db.config, token: undefined }));
   if (typeof body.name === 'string' && body.name.trim()) db.config.name = body.name.trim();
   if (Array.isArray(body.providers))
     db.config.providers = body.providers.map((p: Provider) => ({ ...withKey(p), id: p.id || newId('prov') }));
@@ -141,6 +167,21 @@ on('PUT', '/api/config', async ({ body }) => {
   }
   save('config');
   changed('config');
+  // Providers: log names and whether a key changed, never the key.
+  const fields = diff(before, db.config, Object.keys(body).filter((k) => k !== 'providers' && k !== 'connections'));
+  if (Array.isArray(body.providers)) {
+    const was = new Map<string, Provider>(before.providers.map((p: Provider) => [p.id, p]));
+    const now = new Map(db.config.providers.map((p) => [p.id, p]));
+    const added = [...now.values()].filter((p) => !was.has(p.id)).map((p) => p.name);
+    const removed = [...was.values()].filter((p) => !now.has(p.id)).map((p) => p.name);
+    const keyChanged = [...now.values()].filter((p) => was.has(p.id) && was.get(p.id)!.apiKey !== p.apiKey).map((p) => p.name);
+    const edited = [...now.values()].filter((p) => was.has(p.id) && JSON.stringify({ ...was.get(p.id), apiKey: 0 }) !== JSON.stringify({ ...p, apiKey: 0 })).map((p) => p.name);
+    if (added.length) fields.providersAdded = added;
+    if (removed.length) fields.providersRemoved = removed;
+    if (edited.length) fields.providersEdited = edited;
+    if (keyChanged.length) fields.apiKeyChanged = keyChanged;
+  }
+  logChange('config.update', db.config.name, fields);
   return { ok: true };
 });
 on('POST', '/api/providers/models', async ({ body }) => ({ models: await listModels(withKey(body.provider)) }));
@@ -156,6 +197,7 @@ on('GET', '/api/bots', () => db.bots);
 on('POST', '/api/bots', ({ body }) => {
   const bot = botFrom(body);
   db.bots.push(bot);
+  logChange('bot.create', bot.name, botFields(undefined, bot));
   wsDir(bot.id);
   save('bots');
   changed('bots');
@@ -164,7 +206,9 @@ on('POST', '/api/bots', ({ body }) => {
 on('PUT', '/api/bots/:id', ({ params, body }) => {
   const i = db.bots.findIndex((b) => b.id === params[0]);
   if (i < 0) throw new HttpError(404, 'Bot not found');
-  db.bots[i] = botFrom(body, db.bots[i]);
+  const was = db.bots[i];
+  db.bots[i] = botFrom(body, was);
+  logChange('bot.update', db.bots[i].name, botFields(was, db.bots[i]));
   if (db.bots[i].isolation !== 'container') void removeContainer(db.bots[i].id);
   save('bots');
   changed('bots');
@@ -172,6 +216,7 @@ on('PUT', '/api/bots/:id', ({ params, body }) => {
 });
 on('DELETE', '/api/bots/:id', async ({ params }) => {
   const id = params[0];
+  logChange('bot.delete', db.bots.find((b) => b.id === id)?.name, {});
   await removeContainer(id);
   db.bots = db.bots.filter((b) => b.id !== id);
   for (const t of db.threads.filter((t) => t.members.includes(id))) {
@@ -269,6 +314,7 @@ const routineFrom = (body: any, old?: Routine): Routine => ({
 on('POST', '/api/routines', ({ body }) => {
   const r = routineFrom(body);
   db.routines.push(r);
+  logChange('routine.create', r.name, diff(undefined, r, ['name', 'botId', 'cron', 'enabled', 'monthlyLimit']));
   save('routines');
   changed('routines');
   return r;
@@ -276,12 +322,15 @@ on('POST', '/api/routines', ({ body }) => {
 on('PUT', '/api/routines/:id', ({ params, body }) => {
   const i = db.routines.findIndex((r) => r.id === params[0]);
   if (i < 0) throw new HttpError(404, 'Routine not found');
-  db.routines[i] = routineFrom(body, db.routines[i]);
+  const was = db.routines[i];
+  db.routines[i] = routineFrom(body, was);
+  logChange('routine.update', db.routines[i].name, diff(was, db.routines[i], ['name', 'botId', 'prompt', 'cron', 'enabled', 'monthlyLimit']));
   save('routines');
   changed('routines');
   return db.routines[i];
 });
 on('DELETE', '/api/routines/:id', ({ params }) => {
+  logChange('routine.delete', db.routines.find((r) => r.id === params[0])?.name, {});
   db.routines = db.routines.filter((r) => r.id !== params[0]);
   save('routines');
   changed('routines');

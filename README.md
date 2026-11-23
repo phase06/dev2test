@@ -35,6 +35,7 @@ starts one locally and can connect to any number of remote ones. A bot lives on 
 | Connectors | Stdio MCP servers configured per runtime. |
 | Controls | Ask-first / Autonomous / Read-only per bot, inline approvals, Stop. |
 | Prompt-injection defence | Output from web fetch, the browser and MCP connectors reaches the model wrapped as `<untrusted>` data, with a standing rule never to follow instructions in it. Once a conversation contains such content, commands, file changes, connector calls, memory writes, routines and delegation need approval even for autonomous teammates ("Allow for this conversation" or a per-teammate setting turns it off). Content fetched by other means, such as `curl` in the shell, isn't detected. |
+| History | Every run (who, where, what started it, outcome, each tool call and approval decision, cost) and every settings change (which fields; old and new values only for autonomy, isolation, limits, model and similar, never API keys or instructions) go to append-only monthly files in `history/`. The History page reads them and exports a month. |
 | Spending limits | Each reply shows its cost. Monthly USD limits for the whole runtime (Settings → Spending), each teammate (profile) and each routine; checked before every model call, so a run stops at most one call past the limit and says why. Claude prices are built in; other models need a price per model on their provider, and are listed as "not counted" until they have one. |
 
 ### Container isolation

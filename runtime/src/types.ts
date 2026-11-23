@@ -143,6 +143,8 @@ export type Part =
       untrusted?: boolean;
       /** Approval was required because the conversation contains untrusted content. */
       guard?: boolean;
+      /** The user's answer when approval was asked. */
+      decision?: 'approve' | 'deny' | 'always' | 'conversation';
     };
 
 export interface Message {

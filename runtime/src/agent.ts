@@ -7,6 +7,7 @@ import { chat, ProviderError, type ChatMsg, type ChatResult, type ImageInput, ty
 import { db, emit, messages, newId, safePath, save, teamMemory, wsDir } from './store';
 import { IMAGE_TYPES, MAX_IMAGE_BYTES, toolsFor, type Tool, type ToolCtx } from './tools';
 import { charge, chargeUnmetered, overLimit } from './pricing';
+import { record, type RunRecord } from './history';
 
 /** Thrown to stop a run at a spending limit. */
 class LimitReached extends Error {}
@@ -453,6 +454,7 @@ async function execTool(part: ToolPart, tools: Tool[], msg: Message, ctx: ToolCt
       });
       approvals.delete(id);
       delete part.approvalId;
+      part.decision = decision;
       emitStatus();
       if (decision === 'always' && !guardAsks) {
         ctx.bot.policy = 'auto';
@@ -497,6 +499,10 @@ export async function runBot(botId: string, threadId: string, depth: number): Pr
   const bot = db.bots.find((b) => b.id === botId);
   const thread = db.threads.find((t) => t.id === threadId);
   if (!bot || !thread) return '';
+  // What started this run, for the history: the last message before it.
+  const prev = messages(threadId).at(-1);
+  const trigger: RunRecord['trigger'] =
+    thread.kind === 'routine' ? 'routine' : thread.kind === 'internal' ? 'teammate' : prev?.author.type === 'bot' ? 'mention' : 'user';
   const msg: Message = { id: newId('m'), threadId, ts: Date.now(), author: { type: 'bot', id: bot.id, name: bot.name }, parts: [], status: 'streaming' };
   messages(threadId).push(msg);
   emit({ type: 'message', message: msg });
@@ -606,6 +612,29 @@ export async function runBot(botId: string, threadId: string, depth: number): Pr
     }
   } finally {
     running.delete(msg.id);
+    const routine = db.routines.find((r) => r.threadId === threadId);
+    record({
+      type: 'run',
+      id: msg.id,
+      ts: msg.ts,
+      end: Date.now(),
+      botId: bot.id,
+      botName: bot.name,
+      threadId,
+      threadTitle: thread.title,
+      threadKind: thread.kind,
+      ...(routine ? { routineId: routine.id, routineName: routine.name } : {}),
+      trigger,
+      status: msg.limited ? 'limited' : msg.refusal ? 'declined' : msg.status === 'streaming' ? 'error' : msg.status,
+      ...(msg.error ? { error: msg.error.slice(0, 500) } : {}),
+      model: msg.model ?? bot.model,
+      ...(msg.usage ? { usage: msg.usage } : {}),
+      ...(msg.cost !== undefined ? { cost: msg.cost } : {}),
+      ...(thread.untrustedSince ? { untrusted: true } : {}),
+      tools: msg.parts
+        .filter((p): p is ToolPart => p.type === 'tool')
+        .map((p) => ({ name: p.name, args: p.args.slice(0, 300), status: p.status, ...(p.decision ? { decision: p.decision } : {}), ...(p.untrusted ? { untrusted: true } : {}) })),
+    });
     save(`messages/${threadId}`);
     touch(thread);
     emit({ type: 'message', message: msg });

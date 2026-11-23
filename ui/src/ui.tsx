@@ -15,6 +15,7 @@ const PATHS: Record<string, string> = {
   link: 'M8 12h8M9 17H7a5 5 0 010-10h2M15 7h2a5 5 0 010 10h-2',
   play: 'M7 5l12 7-12 7z',
   trash: 'M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13',
+  list: 'M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01',
 };
 
 export function Icon({ name, size = 16 }: { name: keyof typeof PATHS | string; size?: number }) {

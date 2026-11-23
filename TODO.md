@@ -54,7 +54,8 @@ Last reviewed: 2026-11-20.
 - [ ] Remaining: content fetched via the shell (curl, git clone) or read from downloaded files isn't
       marked untrusted; a summary of untrusted content loses the wrapper; unattended routines that read
       the web will wait for approval unless the check is turned off for that teammate.
-- [ ] **Run history / audit log** per teammate: what ran, when, and what it cost.
+- [x] Run history and settings change log (append-only monthly JSONL, History page, export).
+- [ ] Remaining: no retention policy (files grow until deleted by hand); not tamper-evident (no hash chain or signing).
 
 ## Spending limits: known limits
 
