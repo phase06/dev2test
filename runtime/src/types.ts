@@ -10,6 +10,11 @@ export interface Provider {
   headers?: Record<string, string>;
   stream?: boolean;
   maxTokens?: number;
+  /**
+   * Anthropic only: retry requests Claude declines on a fallback model (server-side fallbacks).
+   * Default: on for api.anthropic.com, off for other hosts.
+   */
+  fallbacks?: boolean;
 }
 
 export interface McpServerCfg {
@@ -48,6 +53,7 @@ export interface SandboxCfg {
 }
 
 export type Policy = 'auto' | 'ask' | 'readonly';
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface BotTools {
   shell: boolean;
@@ -69,6 +75,8 @@ export interface Bot {
   providerId: string;
   model: string;
   policy: Policy;
+  /** How hard the model thinks. Unset: the model's default (medium on Claude Opus 5.5). */
+  effort?: Effort;
   /** Where shell commands run: on the runtime host, or in this bot's own container. */
   isolation: 'host' | 'container';
   tools: BotTools;
@@ -91,6 +99,8 @@ export type ToolStatus = 'pending' | 'approval' | 'running' | 'done' | 'error' |
 
 export type Part =
   | { type: 'text'; text: string }
+  /** A progress note the model wrote between tool calls (shown to the user, not replayed as text). */
+  | { type: 'note'; text: string }
   | { type: 'tool'; id: string; name: string; args: string; result?: string; status: ToolStatus; approvalId?: string; images?: string[] };
 
 export interface Message {
@@ -108,6 +118,13 @@ export interface Message {
   /** Fallback when summarising failed: tool outputs before this part index are no longer sent. */
   clearedUpTo?: number;
   usage?: Usage;
+  /** Model the provider reported serving this run's last call, and why that call stopped. */
+  model?: string;
+  stopReason?: string;
+  /** Set when the model declined; `status` is then 'error'. */
+  refusal?: { category?: string | null; explanation?: string };
+  /** Anthropic only: each step's original content blocks (thinking etc.), replayed verbatim. */
+  raw?: { kind: 'anthropic'; steps: (unknown[] | null)[] };
 }
 
 /** Token usage, summed over every model call in a run. `input` excludes cache reads and writes. */

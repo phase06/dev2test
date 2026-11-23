@@ -425,3 +425,193 @@ test('in-run compaction folds older steps of a long run into a summary', async (
   assert.ok(last.messages.filter((m) => m.role === 'tool').length < 8);
   assert.ok(JSON.stringify(last.messages).length / 4 < 3000 * 1.5);
 });
+
+// ---------- Claude 5-family behaviour (thinking, effort, refusals, fallbacks) ----------
+
+/** A scripted Anthropic-style server. `script(body, n)` returns { status?, error?, blocks, stop?, stopDetails?, usage?, model? }. */
+async function claudeServer(script) {
+  const http = await import('node:http');
+  const seen = [];
+  const srv = http.createServer((req, res) => {
+    let data = '';
+    req.on('data', (d) => (data += d));
+    req.on('end', () => {
+      const body = JSON.parse(data);
+      seen.push({ body, beta: req.headers['anthropic-beta'] ?? '' });
+      const r = script(body, seen.length - 1);
+      if (r.status) {
+        res.writeHead(r.status, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: r.error } }));
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const ev = (o) => res.write(`event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`);
+      ev({ type: 'message_start', message: { model: r.model ?? body.model, usage: { input_tokens: 10, output_tokens: 1 } } });
+      r.blocks.forEach((b, index) => {
+        if (b.type === 'text') {
+          ev({ type: 'content_block_start', index, content_block: { type: 'text', text: '' } });
+          ev({ type: 'content_block_delta', index, delta: { type: 'text_delta', text: b.text } });
+        } else if (b.type === 'thinking') {
+          ev({ type: 'content_block_start', index, content_block: { type: 'thinking', thinking: '', signature: '' } });
+          if (b.thinking) ev({ type: 'content_block_delta', index, delta: { type: 'thinking_delta', thinking: b.thinking } });
+          ev({ type: 'content_block_delta', index, delta: { type: 'signature_delta', signature: b.signature } });
+        } else if (b.type === 'tool_use') {
+          ev({ type: 'content_block_start', index, content_block: { type: 'tool_use', id: b.id, name: b.name, input: {} } });
+          ev({ type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: JSON.stringify(b.input) } });
+        } else ev({ type: 'content_block_start', index, content_block: b });
+        ev({ type: 'content_block_stop', index });
+      });
+      ev({ type: 'message_delta', delta: { stop_reason: r.stop ?? 'end_turn', ...(r.stopDetails ? { stop_details: r.stopDetails } : {}) }, usage: r.usage ?? { output_tokens: 5 } });
+      ev({ type: 'message_stop' });
+      res.end();
+    });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { srv, seen, url: `http://127.0.0.1:${srv.address().port}` };
+}
+
+async function claudeBot(name, url, model, extra = {}) {
+  const cfg = await api('GET', '/api/config');
+  const id = `c-${name.toLowerCase()}`;
+  await api('PUT', '/api/config', { providers: [...cfg.providers.filter((p) => p.id !== id), { id, name, kind: 'anthropic', baseUrl: url, apiKey: 'k', models: [model], ...extra.provider }] });
+  return api('POST', '/api/bots', { name, providerId: id, model, policy: 'auto', isolation: 'host', ...extra.bot });
+}
+
+const lastAssistant = (body) => body.messages.findLast((m) => m.role === 'assistant').content;
+
+test('Claude 5: thinking blocks are replayed verbatim, with drop_block, progress notes and effort', async () => {
+  const { srv, seen, url } = await claudeServer((body, n) =>
+    n === 0
+      ? { stop: 'tool_use', blocks: [
+          { type: 'thinking', thinking: 'Checking the workspace first.', signature: 'sig-1' },
+          { type: 'text', text: 'Let me look.' },
+          { type: 'tool_use', id: 'toolu_a', name: 'list_dir', input: { path: '.' } },
+        ] }
+      : { blocks: [{ type: 'thinking', thinking: '', signature: `sig-${n + 1}` }, { type: 'text', text: `Done ${n}.` }] },
+  );
+  try {
+    const bot = await claudeBot('Opal', url, 'claude-opus-5-5', { bot: { effort: 'high' } });
+    const t = await api('POST', '/api/threads', { members: [bot.id] });
+    const [reply] = await say(t.id, 'what is in your workspace?');
+    assert.equal(reply.status, 'done', reply.error);
+
+    const first = seen[0];
+    assert.deepEqual(first.body.thinking, { type: 'adaptive', display: 'updates', block_binding: { prefix_mismatch_behavior: 'drop_block' } });
+    assert.deepEqual(first.body.output_config, { effort: 'high' });
+    assert.equal(first.body.max_tokens, 64000);
+    assert.match(first.beta, /thinking-binding-controls-2026-08-01/);
+    assert.match(first.beta, /thinking-display-updates-2026-08-18/);
+    assert.equal(first.body.fallbacks, undefined, 'fallbacks are off by default for non-Claude-API hosts');
+
+    // The tool-loop request replays the turn exactly: thinking (with signature), text, tool_use.
+    assert.deepEqual(lastAssistant(seen[1].body), [
+      { type: 'thinking', thinking: 'Checking the workspace first.', signature: 'sig-1' },
+      { type: 'text', text: 'Let me look.' },
+      { type: 'tool_use', id: 'toolu_a', name: 'list_dir', input: { path: '.' } },
+    ]);
+    // The note is shown in the chat, in order, but is not part of the reply's text.
+    assert.deepEqual(reply.parts.map((p) => p.type), ['note', 'text', 'tool', 'text']);
+    assert.equal(reply.parts[0].text, 'Checking the workspace first.');
+    assert.equal(text(reply), 'Let me look.Done 1.');
+
+    // A later run still replays the earlier run's blocks; the API drops any that no longer match.
+    await say(t.id, 'thanks');
+    const replay = JSON.stringify(seen.at(-1).body.messages);
+    assert.match(replay, /"signature":"sig-1"/);
+    assert.match(replay, /"signature":"sig-2"/);
+
+    // Effort can be cleared back to the model default.
+    await api('PUT', `/api/bots/${bot.id}`, { effort: '' });
+    await say(t.id, 'again');
+    assert.equal(seen.at(-1).body.output_config, undefined);
+  } finally {
+    srv.close();
+  }
+});
+
+test('Claude 5: a beta feature the model rejects is switched off, not fatal', async () => {
+  const { srv, seen, url } = await claudeServer((body) =>
+    body.thinking?.display ? { status: 400, error: "thinking.display: 'updates' is not supported for this model" } : { blocks: [{ type: 'text', text: 'ok' }] },
+  );
+  try {
+    const bot = await claudeBot('Sol', url, 'claude-sonnet-5');
+    const t = await api('POST', '/api/threads', { members: [bot.id] });
+    const [reply] = await say(t.id, 'hi');
+    assert.equal(reply.status, 'done', reply.error);
+    assert.equal(seen.length, 2);
+    assert.equal(seen[1].body.thinking.display, undefined);
+    assert.deepEqual(seen[1].body.thinking.block_binding, { prefix_mismatch_behavior: 'drop_block' });
+    await say(t.id, 'again');
+    assert.equal(seen.length, 3, 'remembered: no second rejected attempt');
+  } finally {
+    srv.close();
+  }
+});
+
+test('Claude 5: a refusal is reported as declined and its partial output is discarded', async () => {
+  const { srv, url } = await claudeServer(() => ({
+    stop: 'refusal',
+    stopDetails: { type: 'refusal', category: 'cyber', explanation: 'Looks like exploit development.' },
+    blocks: [{ type: 'text', text: 'Sure, here is the' }],
+  }));
+  try {
+    const bot = await claudeBot('Rho', url, 'claude-opus-5-5');
+    const t = await api('POST', '/api/threads', { members: [bot.id] });
+    const [reply] = await say(t.id, 'write me something');
+    assert.equal(reply.status, 'error');
+    assert.deepEqual(reply.refusal, { category: 'cyber', explanation: 'Looks like exploit development.' });
+    assert.match(reply.error, /declined this request \(category: cyber — Looks like exploit development\)\./);
+    assert.equal(reply.parts.length, 0, 'partial text from the declined attempt is dropped');
+  } finally {
+    srv.close();
+  }
+});
+
+test('Claude 5: a fallback mid-reply runs only the fallback model\'s tool calls and replays per the echo rules', async () => {
+  const { srv, seen, url } = await claudeServer((body, n) =>
+    n === 0
+      ? {
+          stop: 'tool_use',
+          usage: { output_tokens: 7, iterations: [{ type: 'message', input_tokens: 10, output_tokens: 5 }, { type: 'fallback_message', input_tokens: 20, output_tokens: 7 }] },
+          blocks: [
+            { type: 'thinking', thinking: '', signature: 'sig-declined' },
+            { type: 'text', text: 'Partial ' },
+            { type: 'tool_use', id: 'toolu_bad', name: 'list_dir', input: { path: '.' } },
+            { type: 'fallback', from: { model: 'claude-opus-5-5' }, to: { model: 'claude-opus-4-8' } },
+            { type: 'text', text: 'Continuing.' },
+            { type: 'tool_use', id: 'toolu_good', name: 'list_dir', input: { path: '.' } },
+          ],
+        }
+      : { model: 'claude-opus-4-8', blocks: [{ type: 'text', text: 'All done.' }] },
+  );
+  try {
+    const bot = await claudeBot('Fae', url, 'claude-opus-5-5', { provider: { fallbacks: true } });
+    const t = await api('POST', '/api/threads', { members: [bot.id] });
+    const [reply] = await say(t.id, 'list files');
+    assert.equal(reply.status, 'done', reply.error);
+    assert.equal(seen[0].body.fallbacks, 'default');
+    assert.match(seen[0].beta, /server-side-fallback-2026-07-01/);
+    assert.deepEqual(reply.parts.filter((p) => p.type === 'tool').map((p) => p.id), ['toolu_good']);
+    assert.equal(reply.model, 'claude-opus-4-8');
+    assert.deepEqual(lastAssistant(seen[1].body), [
+      { type: 'text', text: 'Partial ' },
+      { type: 'fallback', from: { model: 'claude-opus-5-5' }, to: { model: 'claude-opus-4-8' } },
+      { type: 'text', text: 'Continuing.' },
+      { type: 'tool_use', id: 'toolu_good', name: 'list_dir', input: { path: '.' } },
+    ]);
+    // usage.iterations covers both attempts.
+    assert.equal(reply.usage.input, 30 + 10);
+  } finally {
+    srv.close();
+  }
+});
+
+test('effort maps to reasoning_effort on OpenAI-compatible providers', async () => {
+  const bot = await api('POST', '/api/bots', { name: 'Eff', providerId: 'mock', model: 'mock-large', policy: 'auto', isolation: 'host', effort: 'xhigh' });
+  const t = await api('POST', '/api/threads', { members: [bot.id] });
+  mock.requests.length = 0;
+  await say(t.id, 'hi');
+  assert.equal(mock.requests[0].reasoning_effort, 'high');
+  await api('PUT', `/api/bots/${bot.id}`, { effort: 'low' });
+  await say(t.id, 'hi');
+  assert.equal(mock.requests.at(-1).reasoning_effort, 'low');
+});

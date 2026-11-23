@@ -1,0 +1,5 @@
+{
+  "prompt": "The unit tests in this project are failing. Find out why and fix the code so they pass. Don't change the tests.",
+  "tags": ["code", "easy"],
+  "template": "Ada"
+}

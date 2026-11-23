@@ -1,0 +1,5 @@
+{
+  "prompt": "Our API had a rough night. Go through app.log and write incidents.json: a list with one entry per distinct error code (the E-codes), each with \"code\", \"count\" and \"first_seen\" (the timestamp exactly as it appears in the log). Sort by count, highest first. Then give me a two-line summary of what looks most urgent.",
+  "tags": ["ops", "medium"],
+  "template": "Otto"
+}

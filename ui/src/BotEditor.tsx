@@ -50,7 +50,8 @@ export function BotEditor({ rt, botId, others, onDone, onChat }: { rt: Runtime; 
   const saveBot = async () => {
     setErr('');
     try {
-      const saved = existing ? await rt.client.put<Bot>(`/api/bots/${existing.id}`, d) : await rt.client.post<Bot>('/api/bots', d);
+      const body = { ...d, effort: d.effort ?? '' }; // '' tells the server to clear it
+      const saved = existing ? await rt.client.put<Bot>(`/api/bots/${existing.id}`, body) : await rt.client.post<Bot>('/api/bots', body);
       if (existing && memory !== null) await rt.client.put(`/api/bots/${existing.id}/memory`, { text: memory });
       await rt.reload();
       if (existing) setNote('Saved.');
@@ -133,6 +134,19 @@ export function BotEditor({ rt, botId, others, onDone, onChat }: { rt: Runtime; 
             <Field label="Model" hint="Pick from the provider's list or type any model id.">
               <input list="models" value={d.model} onChange={(e) => set({ model: e.target.value })} placeholder="model id" />
               <datalist id="models">{provider?.models.map((m) => <option key={m} value={m} />)}</datalist>
+            </Field>
+            <Field
+              label="Effort"
+              hint="How hard the model thinks before acting. Higher is slower and costs more. Claude Opus 5.5 defaults to Medium; other models may ignore or reject this."
+            >
+              <select value={d.effort ?? ''} onChange={(e) => set({ effort: (e.target.value || undefined) as Bot['effort'] })}>
+                <option value="">Model default</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="xhigh">Extra high</option>
+                <option value="max">Max</option>
+              </select>
             </Field>
           </div>
         ) : (

@@ -133,6 +133,8 @@ interface CtxOpts {
   currentId?: string;
   /** Leave images out (the model rejected them). */
   noImages?: boolean;
+  /** Replay stored Anthropic content blocks (thinking included) when the provider speaks that format. */
+  raw?: boolean;
 }
 
 function buildContext(bot: Bot, thread: Thread, o: CtxOpts): ChatMsg[] {
@@ -149,13 +151,14 @@ function buildContext(bot: Bot, thread: Thread, o: CtxOpts): ChatMsg[] {
       const from = m.runSummary?.upTo ?? 0;
       if (m.runSummary)
         out.push({ role: 'user', content: `[Summary of your earlier steps in this task — their full tool outputs are no longer shown]\n${m.runSummary.text}` });
-      for (const seg of segmentsOf(m)) {
-        const idx = m.parts.indexOf(seg[0]);
-        if (idx < from) continue;
+      segmentsOf(m).forEach((seg, i) => {
+        const idx = m.stepStarts?.[i] ?? m.parts.indexOf(seg[0]);
+        if (idx < from) return;
         const text = seg.filter((p) => p.type === 'text').map((p) => (p as { text: string }).text).join('');
         const calls = seg.filter((p): p is ToolPart => p.type === 'tool');
-        if (!text && !calls.length) continue;
-        out.push({ role: 'assistant', content: text, toolCalls: calls.map((c) => ({ id: c.id, name: c.name, args: c.args })) });
+        const raw = o.raw && m.raw?.kind === 'anthropic' ? m.raw.steps[i] : null;
+        if (!raw?.length && !text && !calls.length) return;
+        out.push({ role: 'assistant', content: text, toolCalls: calls.map((c) => ({ id: c.id, name: c.name, args: c.args })), ...(raw?.length ? { raw } : {}) });
         for (const c of calls) {
           const cleared = m.clearedUpTo !== undefined && m.parts.indexOf(c) < m.clearedUpTo;
           let content =
@@ -174,7 +177,7 @@ function buildContext(bot: Bot, thread: Thread, o: CtxOpts): ChatMsg[] {
           }
           out.push({ role: 'tool', toolCallId: c.id, content, ...(images?.length ? { images } : {}) });
         }
-      }
+      });
     } else {
       const text = textOf(m);
       if (!text) continue;
@@ -210,7 +213,7 @@ const SUMMARISER = `You maintain a running summary of a workplace conversation s
 Keep: the user's goals and decisions; constraints and preferences; what each participant did, with the files, commands and results that matter; open tasks and unanswered questions; exact names, paths, ids and numbers later work depends on.
 Drop pleasantries and details that were superseded. Plain text, under 500 words. Output only the updated summary.`;
 
-const sizeOf = (m: Message) => m.parts.reduce((n, p) => n + (p.type === 'text' ? p.text.length : p.args.length + (p.result?.length ?? 0)), 0);
+const sizeOf = (m: Message) => m.parts.reduce((n, p) => n + (p.type === 'tool' ? p.args.length + (p.result?.length ?? 0) : p.text.length), 0);
 
 /**
  * Summarise old history once a thread outgrows the budget. The summary is stored on the thread and
@@ -233,9 +236,9 @@ async function compact(bot: Bot, thread: Thread, provider: Provider, signal: Abo
     .map((m) =>
       m.parts
         .map((p) =>
-          p.type === 'text'
-            ? `[${m.author.name}]: ${p.text.slice(0, 4000)}`
-            : `[${m.author.name} used ${p.name}] ${p.args.slice(0, 400)} -> ${(p.result ?? '').slice(0, 400)}`,
+          p.type === 'tool'
+            ? `[${m.author.name} used ${p.name}] ${p.args.slice(0, 400)} -> ${(p.result ?? '').slice(0, 400)}`
+            : `[${m.author.name}${p.type === 'note' ? ' (note)' : ''}]: ${p.text.slice(0, 4000)}`,
         )
         .join('\n'),
     )
@@ -302,7 +305,7 @@ function estimateTokensOfParts(m: Message, from: number, to: number) {
   let chars = 0;
   let images = 0;
   for (const p of m.parts.slice(from, to)) {
-    if (p.type === 'text') chars += p.text.length;
+    if (p.type !== 'tool') chars += p.type === 'text' ? p.text.length : 0;
     else {
       chars += p.args.length + (p.result?.length ?? 0);
       images += p.images?.length ?? 0;
@@ -311,7 +314,7 @@ function estimateTokensOfParts(m: Message, from: number, to: number) {
   return Math.ceil(chars / 4) + images * IMAGE_TOKENS;
 }
 
-type CallFn = (ctx: ChatMsg[], tools: ToolDef[], toolChoice?: 'auto' | 'none', onDelta?: (t: string) => void) => Promise<ChatResult>;
+type CallFn = (ctx: ChatMsg[], tools: ToolDef[], toolChoice?: 'auto' | 'none', onDelta?: (t: string) => void, onNote?: (t: string) => void) => Promise<ChatResult>;
 
 /** Models (provider id + model) that rejected image input; their requests are sent without images. */
 const noVision = new Set<string>();
@@ -462,16 +465,17 @@ export async function runBot(botId: string, threadId: string, depth: number): Pr
     const ctx: ToolCtx = { bot, thread, ws: wsDir(bot.id), signal: abort.signal, depth, delegate: (n, m) => delegate(bot, n, m) };
     const visionKey = `${provider.id}\u0000${bot.model}`;
     const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
-    const call: CallFn = async (messagesIn, toolDefs, toolChoice, onDelta) => {
+    const call: CallFn = async (messagesIn, toolDefs, toolChoice, onDelta, onNote) => {
       let res: ChatResult;
       const hasImages = messagesIn.some((m) => m.images?.length);
+      const opts = { signal: abort.signal, onDelta, onNote, toolChoice, effort: bot.effort };
       try {
-        res = await chat(provider, bot.model, messagesIn, toolDefs, { signal: abort.signal, onDelta, toolChoice });
+        res = await chat(provider, bot.model, messagesIn, toolDefs, opts);
       } catch (e) {
         // A model without vision: retry once without images and remember, if that works.
         if (!(hasImages && e instanceof ProviderError && e.status >= 400 && e.status < 500 && e.status !== 429)) throw e;
         const stripped = messagesIn.map((m) => (m.images?.length ? { ...m, images: undefined, content: m.content + '\n[image omitted: this model does not accept images]' } : m));
-        res = await chat(provider, bot.model, stripped, toolDefs, { signal: abort.signal, onDelta, toolChoice });
+        res = await chat(provider, bot.model, stripped, toolDefs, opts);
         noVision.add(visionKey);
       }
       usage.calls++;
@@ -482,22 +486,41 @@ export async function runBot(botId: string, threadId: string, depth: number): Pr
         usage.cacheWrite += res.usage.cacheWrite;
       }
       msg.usage = { ...usage };
+      if (res.model) msg.model = res.model;
+      if (res.stopReason) msg.stopReason = res.stopReason;
       return res;
     };
-    const context = () => buildContext(bot, thread, { sys, currentId: msg.id, noImages: noVision.has(visionKey) });
+    const context = () => buildContext(bot, thread, { sys, currentId: msg.id, noImages: noVision.has(visionKey), raw: provider.kind === 'anthropic' });
     const onDelta = (text: string) => {
       const last = msg.parts[msg.parts.length - 1];
       if (last?.type === 'text') last.text += text;
       else msg.parts.push({ type: 'text', text });
       emit({ type: 'delta', threadId, messageId: msg.id, text });
     };
+    const onNote = (text: string) => {
+      msg.parts.push({ type: 'note', text });
+      emit({ type: 'message', message: msg });
+    };
     msg.stepStarts = [];
     let step = 0;
     for (; step < MAX_STEPS; step++) {
       if (step > 0 && estimateTokens(context()) > db.config.contextTokens)
         await compactRun(bot, thread, msg, provider, sys, defs, abort.signal, call);
-      msg.stepStarts.push(msg.parts.length);
-      const res = await call(context(), defs, 'auto', onDelta);
+      const stepStart = msg.parts.length;
+      msg.stepStarts.push(stepStart);
+      const res = await call(context(), defs, 'auto', onDelta, onNote);
+      if (res.stopReason === 'refusal') {
+        // A decline can come after partial output; that partial is not a real answer, so drop it.
+        msg.parts.length = stepStart;
+        msg.stepStarts.pop();
+        msg.refusal = res.refusal ?? {};
+        const why = [res.refusal?.category && `category: ${res.refusal.category}`, res.refusal?.explanation?.replace(/\.\s*$/, '')].filter(Boolean).join(' — ');
+        throw new Error(`${bot.model} declined this request${why ? ` (${why})` : ''}. Rephrase it, or give ${bot.name} a different model.`);
+      }
+      if (res.raw && provider.kind === 'anthropic') {
+        msg.raw ??= { kind: 'anthropic', steps: [] };
+        msg.raw.steps[msg.stepStarts.length - 1] = res.raw;
+      }
       if (!res.toolCalls.length) break;
       const parts: ToolPart[] = res.toolCalls.map((tc) => ({ type: 'tool', id: tc.id, name: tc.name, args: tc.args, status: 'pending' }));
       msg.parts.push(...parts);
