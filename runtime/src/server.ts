@@ -7,6 +7,10 @@ import { fileURLToPath } from 'node:url';
 import type { Bot, Provider, Routine, RuntimeInfo, Thread } from './types';
 import { HOME, db, dropMessages, emit, messages, newId, safePath, save, setTeamMemory, subscribe, teamMemory, wsDir } from './store';
 import { detectEngine, removeContainer, sandboxInfo } from './sandbox';
+import { BUILTIN_PRICES, ledger, priceFor } from './pricing';
+
+/** A spending limit from the UI: a positive number of USD, or '' / 0 / null to remove it. */
+const limitFrom = (v: unknown, old?: number) => (v === undefined ? old : Number(v) > 0 ? Math.round(Number(v) * 100) / 100 : undefined);
 import { postMessage, resolveApproval, runRoutine, snapshot, stopThread } from './agent';
 import { chat, listModels } from './providers';
 import { mcpClients, syncMcp } from './mcp';
@@ -66,6 +70,7 @@ function botFrom(body: any, old?: Bot): Bot {
     policy: ['auto', 'ask', 'readonly'].includes(body.policy) ? body.policy : old?.policy || 'ask',
     // '' clears the setting back to the model's default
     effort: body.effort === '' ? undefined : EFFORTS.includes(body.effort) ? body.effort : old?.effort,
+    monthlyLimit: limitFrom(body.monthlyLimit, old?.monthlyLimit),
     isolation: ['host', 'container'].includes(body.isolation) ? body.isolation : old?.isolation || (sandboxInfo().available ? 'container' : 'host'),
     tools: { shell: true, files: true, web: true, browser: false, mcp: true, team: true, teamMemory: false, ...(old?.tools || {}), ...(body.tools || {}) },
     createdAt: old?.createdAt || Date.now(),
@@ -93,7 +98,17 @@ on('GET', '/api/config', () => ({
   connections: db.config.connections,
   sandbox: db.config.sandbox,
   contextTokens: db.config.contextTokens,
+  monthlyLimit: db.config.monthlyLimit,
 }));
+// Spending this month, plus which teammates' models have no price (so their spending can't be limited).
+on('GET', '/api/spend', () => {
+  const l = ledger();
+  const unpricedBots = db.bots
+    .filter((b) => !priceFor(db.config.providers.find((p) => p.id === b.providerId), b.model))
+    .map((b) => b.id);
+  return { ...l, monthlyLimit: db.config.monthlyLimit, unpricedBots };
+});
+on('GET', '/api/prices', () => BUILTIN_PRICES);
 on('GET', '/api/team-memory', () => ({ text: teamMemory() }));
 on('PUT', '/api/team-memory', ({ body }) => (setTeamMemory(String(body.text ?? '')), { ok: true }));
 on('PUT', '/api/config', async ({ body }) => {
@@ -102,6 +117,7 @@ on('PUT', '/api/config', async ({ body }) => {
     db.config.providers = body.providers.map((p: Provider) => ({ ...withKey(p), id: p.id || newId('prov') }));
   if (Array.isArray(body.connections)) db.config.connections = body.connections;
   if (Number(body.contextTokens) >= 100) db.config.contextTokens = Math.round(Number(body.contextTokens));
+  if ('monthlyLimit' in body) db.config.monthlyLimit = limitFrom(body.monthlyLimit);
   if (body.sandbox && typeof body.sandbox === 'object')
     db.config.sandbox = {
       image: String(body.sandbox.image || '').trim() || db.config.sandbox.image,
@@ -234,6 +250,7 @@ const routineFrom = (body: any, old?: Routine): Routine => ({
   enabled: body.enabled ?? old?.enabled ?? true,
   threadId: old?.botId === (body.botId ?? old?.botId) ? old?.threadId : undefined,
   lastRun: old?.lastRun,
+  monthlyLimit: limitFrom(body.monthlyLimit, old?.monthlyLimit),
 });
 on('POST', '/api/routines', ({ body }) => {
   const r = routineFrom(body);

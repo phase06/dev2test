@@ -615,3 +615,97 @@ test('effort maps to reasoning_effort on OpenAI-compatible providers', async () 
   await say(t.id, 'hi');
   assert.equal(mock.requests.at(-1).reasoning_effort, 'low');
 });
+
+// ---------- spending limits ----------
+// The mock reports 100 prompt tokens (60 cached) and 7 completion tokens per call. At $1000/M in and
+// out (cache reads 0.1x), one call costs 40*1000e-6 + 60*100e-6 + 7*1000e-6 = $0.053.
+const CALL = 0.053;
+const near = (a, b) => Math.abs(a - b) < 1e-9;
+async function priceMock(prices) {
+  const cfg = await api('GET', '/api/config');
+  await api('PUT', '/api/config', { providers: cfg.providers.map((p) => (p.id === 'mock' ? { ...p, prices } : p)) });
+}
+
+test('spending: models without a price are listed, not counted', async () => {
+  const spend = await api('GET', '/api/spend');
+  assert.ok(spend.unpricedBots.includes(ada.id));
+  assert.ok(spend.unpriced['mock-large'] > 0);
+  assert.match(spend.month, /^\d{4}-\d{2}$/);
+});
+
+test('spending: each reply records its cost, and it adds up per teammate', async () => {
+  await priceMock({ 'mock-large': { input: 1000, output: 1000 } });
+  const bot = await api('POST', '/api/bots', { name: 'Penny', providerId: 'mock', model: 'mock-large', policy: 'auto', isolation: 'host' });
+  const t = await api('POST', '/api/threads', { members: [bot.id] });
+  const [reply] = await say(t.id, 'hi');
+  assert.ok(near(reply.cost, CALL), `cost ${reply.cost}`);
+  const spend = await api('GET', '/api/spend');
+  assert.ok(near(spend.bots[bot.id], CALL));
+  assert.ok(!spend.unpricedBots.includes(bot.id));
+});
+
+test('spending: a teammate at its limit stops before calling the model', async () => {
+  const bot = await api('POST', '/api/bots', { name: 'Lim', providerId: 'mock', model: 'mock-large', policy: 'auto', isolation: 'host', monthlyLimit: 0.05 });
+  const t = await api('POST', '/api/threads', { members: [bot.id] });
+  const [first] = await say(t.id, 'hi');
+  assert.equal(first.status, 'done', 'under the limit when the call started');
+  const before = mock.requests.length;
+  const [second] = await say(t.id, 'hi again');
+  assert.equal(second.status, 'error');
+  assert.equal(second.limited, true);
+  assert.match(second.error, /Paused: Lim reached its monthly spending limit \(\$0\.05 of \$0\.05\)/);
+  assert.equal(mock.requests.length, before, 'no model call was made');
+  await api('PUT', `/api/bots/${bot.id}`, { monthlyLimit: '' });
+  const [third] = await say(t.id, 'and again');
+  assert.equal(third.status, 'done', 'clearing the limit lets it work again');
+});
+
+test('spending: a long run stops mid-task when it crosses the limit', async () => {
+  const bot = await api('POST', '/api/bots', { name: 'Lena', providerId: 'mock', model: 'mock-large', policy: 'auto', isolation: 'host', monthlyLimit: 0.12 });
+  const t = await api('POST', '/api/threads', { members: [bot.id] });
+  const [reply] = await say(t.id, 'loop 8');
+  assert.equal(reply.limited, true);
+  // Calls start at $0, $0.053 and $0.106 (all under $0.12); the fourth would start at $0.159.
+  assert.equal(reply.parts.filter((p) => p.type === 'tool').length, 3);
+  assert.ok(near(reply.cost, 3 * CALL));
+});
+
+test('spending: routine limits apply to that routine\'s runs', async () => {
+  const bot = await api('POST', '/api/bots', { name: 'Rout', providerId: 'mock', model: 'mock-large', policy: 'auto', isolation: 'host' });
+  const r = await api('POST', '/api/routines', { name: 'Hourly', botId: bot.id, prompt: 'say hello', cron: '', monthlyLimit: 0.01 });
+  const { threadId } = await api('POST', `/api/routines/${r.id}/run`);
+  await until(async () => (await msgs(threadId)).at(-1)?.status === 'done', 'first routine run');
+  assert.ok(near((await api('GET', '/api/spend')).routines[r.id], CALL));
+  await api('POST', `/api/routines/${r.id}/run`);
+  const last = await until(async () => { const m = (await msgs(threadId)).at(-1); return m.author.type === 'bot' && m.status === 'error' && m; }, 'blocked run');
+  assert.match(last.error, /routine "Hourly" reached its monthly spending limit/);
+  // The same teammate outside the routine is unaffected.
+  const t = await api('POST', '/api/threads', { members: [bot.id] });
+  assert.equal((await say(t.id, 'hi'))[0].status, 'done');
+});
+
+test('spending: the runtime-wide limit stops every teammate', async () => {
+  const { total } = await api('GET', '/api/spend');
+  await api('PUT', '/api/config', { monthlyLimit: Math.floor(total * 100) / 100 });
+  try {
+    const t = await api('POST', '/api/threads', { members: [ada.id] });
+    const [reply] = await say(t.id, 'hi');
+    assert.match(reply.error, /this runtime reached its monthly spending limit/);
+  } finally {
+    await api('PUT', '/api/config', { monthlyLimit: null });
+  }
+  assert.equal((await api('GET', '/api/config')).monthlyLimit, undefined);
+});
+
+test('spending: built-in Claude prices are used when the provider sets none', async () => {
+  const { srv, url } = await claudeServer(() => ({ blocks: [{ type: 'text', text: 'ok' }] }));
+  try {
+    const bot = await claudeBot('Cost', url, 'claude-opus-5-5');
+    const t = await api('POST', '/api/threads', { members: [bot.id] });
+    const [reply] = await say(t.id, 'hi');
+    // 10 input and 5 output tokens at $4 / $20 per million.
+    assert.ok(near(reply.cost, (10 * 4 + 5 * 20) / 1e6), `cost ${reply.cost}`);
+  } finally {
+    srv.close();
+  }
+});

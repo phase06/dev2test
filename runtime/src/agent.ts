@@ -6,6 +6,10 @@ import type { Provider } from './types';
 import { chat, ProviderError, type ChatMsg, type ChatResult, type ImageInput, type ToolDef } from './providers';
 import { db, emit, messages, newId, safePath, save, teamMemory, wsDir } from './store';
 import { IMAGE_TYPES, MAX_IMAGE_BYTES, toolsFor, type Tool, type ToolCtx } from './tools';
+import { charge, chargeUnmetered, overLimit } from './pricing';
+
+/** Thrown to stop a run at a spending limit. */
+class LimitReached extends Error {}
 
 const MAX_STEPS = 50;
 const MAX_HOPS = 12; // bot-to-bot handoffs allowed per human message in a group chat
@@ -254,6 +258,7 @@ async function compact(bot: Bot, thread: Thread, provider: Provider, signal: Abo
     [],
     { signal },
   );
+  if (res.usage) charge(provider, res.model ?? bot.model, res.usage, bot.id, db.routines.find((r) => r.threadId === thread.id)?.id);
   if (!res.content.trim()) return;
   thread.summary = { text: res.content.trim(), count: start + chunk.length };
   save('threads');
@@ -455,6 +460,13 @@ export async function runBot(botId: string, threadId: string, depth: number): Pr
   try {
     const provider = db.config.providers.find((p) => p.id === bot.providerId);
     if (!provider) throw new Error(`${bot.name} has no model provider. Add one in Settings, then pick it in the bot's profile.`);
+    // Spending limits are checked before every model call, including summaries.
+    const routine = db.routines.find((r) => r.threadId === threadId);
+    const checkLimit = () => {
+      const why = overLimit(bot, routine);
+      if (why) throw new LimitReached(why);
+    };
+    checkLimit();
     await compact(bot, thread, provider, abort.signal).catch((e) => {
       if (abort.signal.aborted) throw e;
       console.error(`Could not summarise "${thread.title}": ${e?.message || e}`); // carry on with the capped window
@@ -466,6 +478,7 @@ export async function runBot(botId: string, threadId: string, depth: number): Pr
     const visionKey = `${provider.id}\u0000${bot.model}`;
     const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0 };
     const call: CallFn = async (messagesIn, toolDefs, toolChoice, onDelta, onNote) => {
+      checkLimit();
       let res: ChatResult;
       const hasImages = messagesIn.some((m) => m.images?.length);
       const opts = { signal: abort.signal, onDelta, onNote, toolChoice, effort: bot.effort };
@@ -486,6 +499,10 @@ export async function runBot(botId: string, threadId: string, depth: number): Pr
         usage.cacheWrite += res.usage.cacheWrite;
       }
       msg.usage = { ...usage };
+      if (res.usage) {
+        const cost = charge(provider, res.model ?? bot.model, res.usage, bot.id, routine?.id);
+        if (cost !== null) msg.cost = (msg.cost ?? 0) + cost;
+      } else chargeUnmetered(res.model ?? bot.model);
       if (res.model) msg.model = res.model;
       if (res.stopReason) msg.stopReason = res.stopReason;
       return res;
@@ -538,6 +555,7 @@ export async function runBot(botId: string, threadId: string, depth: number): Pr
     else {
       msg.status = 'error';
       msg.error = e?.message || String(e);
+      if (e instanceof LimitReached) msg.limited = true;
     }
   } finally {
     running.delete(msg.id);
@@ -547,7 +565,8 @@ export async function runBot(botId: string, threadId: string, depth: number): Pr
     emitStatus();
   }
   if (msg.status === 'done') route(thread, msg);
-  return textOf(msg);
+  // A delegating teammate gets the reason a delegate stopped, not an empty answer.
+  return msg.status === 'error' ? `[${bot.name} could not finish: ${msg.error}]` : textOf(msg);
 }
 
 // ---------- Routines ----------

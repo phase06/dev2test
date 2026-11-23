@@ -1,6 +1,8 @@
 import templates from './templates.json';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Bot, Config, Connection, Routine, RuntimeInfo, ServerEvent, StatusSnapshot, Thread } from '../../runtime/src/types';
+import type { Bot, Config, Connection, Ledger, Routine, RuntimeInfo, ServerEvent, StatusSnapshot, Thread } from '../../runtime/src/types';
+
+export type Spend = Ledger & { monthlyLimit?: number; unpricedBots: string[] };
 
 export type * from '../../runtime/src/types';
 export type Conn = Connection;
@@ -51,6 +53,7 @@ export interface Runtime {
   bots: Bot[];
   threads: Thread[];
   routines: Routine[];
+  spend: Spend | null;
   status: StatusSnapshot;
   reload: () => Promise<void>;
   subscribe: (fn: (e: ServerEvent) => void) => () => void;
@@ -65,6 +68,7 @@ const empty = {
   bots: [] as Bot[],
   threads: [] as Thread[],
   routines: [] as Routine[],
+  spend: null as Spend | null,
   status: { bots: {}, threads: [] } as StatusSnapshot,
 };
 
@@ -78,14 +82,15 @@ export function useRuntime(conn: Conn): Runtime {
 
   const reload = useCallback(async () => {
     try {
-      const [info, config, bots, threads, routines] = await Promise.all([
+      const [info, config, bots, threads, routines, spend] = await Promise.all([
         client.get<RuntimeInfo>('/api/info'),
         client.get<UiConfig>('/api/config'),
         client.get<Bot[]>('/api/bots'),
         client.get<Thread[]>('/api/threads'),
         client.get<Routine[]>('/api/routines'),
+        client.get<Spend>('/api/spend'),
       ]);
-      if (alive.current === client) setState((s) => ({ ...s, loading: false, online: true, error: '', info, config, bots, threads, routines }));
+      if (alive.current === client) setState((s) => ({ ...s, loading: false, online: true, error: '', info, config, bots, threads, routines, spend }));
     } catch (e: any) {
       if (alive.current === client) setState((s) => ({ ...s, loading: false, online: false, error: e.message }));
     }
@@ -95,7 +100,11 @@ export function useRuntime(conn: Conn): Runtime {
     setState(empty);
     void reload();
     const es = client.events((e) => {
-      if (e.type === 'status') setState((s) => ({ ...s, status: e.status }));
+      if (e.type === 'status') {
+        setState((s) => ({ ...s, status: e.status }));
+        // Runs starting and finishing are when spending changes; cheap enough to refetch then.
+        client.get<Spend>('/api/spend').then((spend) => alive.current === client && setState((s) => ({ ...s, spend })), () => {});
+      }
       else if (e.type === 'changed') void reload();
       subs.current.forEach((f) => f(e));
     });
@@ -132,3 +141,5 @@ export const PRESETS: { label: string; kind: 'openai' | 'anthropic'; baseUrl: st
 
 // Shared with the eval suite (eval/solo), so evaluated teammates match what users get.
 export const TEMPLATES: { name: string; role: string; instructions: string; tools?: Partial<Bot['tools']> }[] = templates;
+
+export const usd = (n: number) => (n === 0 ? '$0' : n < 0.01 ? '<$0.01' : n < 100 ? `$${n.toFixed(2)}` : `$${Math.round(n).toLocaleString()}`);

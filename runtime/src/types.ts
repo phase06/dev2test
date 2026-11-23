@@ -15,6 +15,17 @@ export interface Provider {
    * Default: on for api.anthropic.com, off for other hosts.
    */
   fallbacks?: boolean;
+  /** USD per million tokens by model id, overriding the built-in table (runtime/src/pricing.ts). */
+  prices?: Record<string, Price>;
+}
+
+export interface Price {
+  input: number;
+  output: number;
+  /** Defaults to 0.1x input. */
+  cacheRead?: number;
+  /** Defaults to 1.25x input (5-minute cache). */
+  cacheWrite?: number;
 }
 
 export interface McpServerCfg {
@@ -41,6 +52,8 @@ export interface Config {
   sandbox: SandboxCfg;
   /** Estimated context size (tokens) above which older history, or older steps of a run, are summarised. */
   contextTokens: number;
+  /** Monthly spending limit for the whole runtime, USD. Unset: no limit. */
+  monthlyLimit?: number;
 }
 
 export interface SandboxCfg {
@@ -77,6 +90,8 @@ export interface Bot {
   policy: Policy;
   /** How hard the model thinks. Unset: the model's default (medium on Claude Opus 5.5). */
   effort?: Effort;
+  /** Monthly spending limit for this teammate, USD. Unset: no limit. */
+  monthlyLimit?: number;
   /** Where shell commands run: on the runtime host, or in this bot's own container. */
   isolation: 'host' | 'container';
   tools: BotTools;
@@ -118,6 +133,10 @@ export interface Message {
   /** Fallback when summarising failed: tool outputs before this part index are no longer sent. */
   clearedUpTo?: number;
   usage?: Usage;
+  /** What this run cost in USD, when the model's price is known. */
+  cost?: number;
+  /** Set when the run stopped at a spending limit; `status` is then 'error'. */
+  limited?: boolean;
   /** Model the provider reported serving this run's last call, and why that call stopped. */
   model?: string;
   stopReason?: string;
@@ -146,6 +165,8 @@ export interface Routine {
   enabled: boolean;
   threadId?: string;
   lastRun?: number;
+  /** Monthly spending limit for this routine's runs, USD. Unset: no limit. */
+  monthlyLimit?: number;
 }
 
 export type BotStatus = 'idle' | 'working' | 'approval';
@@ -170,3 +191,16 @@ export type ServerEvent =
   | { type: 'delta'; threadId: string; messageId: string; text: string }
   | { type: 'changed'; what: 'bots' | 'threads' | 'routines' | 'config' }
   | { type: 'status'; status: StatusSnapshot };
+
+/** Spending this calendar month, USD (runtime/src/pricing.ts). */
+export interface Ledger {
+  /** Calendar month in the runtime's local time, e.g. "2026-11". Spending resets when it changes. */
+  month: string;
+  total: number;
+  bots: Record<string, number>;
+  routines: Record<string, number>;
+  /** Models used this month with no known price: their spending is not counted or limited. */
+  unpriced: Record<string, number>; // model -> tokens
+  /** Models whose provider reported no token usage: calls counted, cost unknown. */
+  unmetered?: Record<string, number>; // model -> calls
+}

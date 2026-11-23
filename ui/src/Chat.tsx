@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { Bot, Message, Part, Runtime, Thread } from './api';
+import { usd, type Bot, type Message, type Part, type Runtime, type Thread } from './api';
 import { Markdown } from './md';
 import { Avatar, Icon } from './ui';
 
@@ -68,13 +68,13 @@ function ToolCard({ part, rt, botId }: { part: ToolPart; rt: Runtime; botId?: st
 
 const fmtTokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(n >= 1e4 ? 0 : 1)}k` : String(n));
 
-function UsageBadge({ u }: { u: NonNullable<Message['usage']> }) {
+function UsageBadge({ u, cost }: { u: NonNullable<Message['usage']>; cost?: number }) {
   const totalIn = u.input + u.cacheRead + u.cacheWrite;
   if (!totalIn && !u.output) return null;
   const cached = totalIn ? Math.round((u.cacheRead / totalIn) * 100) : 0;
   return (
     <span className="usage" title={`${u.calls} model call${u.calls === 1 ? '' : 's'} · input ${u.input} · cache read ${u.cacheRead} · cache write ${u.cacheWrite} · output ${u.output} tokens`}>
-      {fmtTokens(totalIn)} in{u.cacheRead > 0 ? ` (${cached}% cached)` : ''} · {fmtTokens(u.output)} out
+      {fmtTokens(totalIn)} in{u.cacheRead > 0 ? ` (${cached}% cached)` : ''} · {fmtTokens(u.output)} out{cost !== undefined ? ` · ${usd(cost)}` : ''}
     </span>
   );
 }
@@ -90,7 +90,7 @@ function MessageRow({ m, rt, bot }: { m: Message; rt: Runtime; bot?: Bot }) {
           <strong>{m.author.name}</strong>
           {bot?.role && <span>{bot.role}</span>}
           <time>{new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>
-          {m.usage && <UsageBadge u={m.usage} />}
+          {m.usage && <UsageBadge u={m.usage} cost={m.cost} />}
         </div>
         {m.parts.map((p, i) => (
           <Fragment key={(p.type === 'tool' ? p.id : 't') + i}>
@@ -104,7 +104,7 @@ function MessageRow({ m, rt, bot }: { m: Message; rt: Runtime; bot?: Bot }) {
         ))}
         {working && !m.parts.some((p) => p.type === 'tool' && p.status === 'approval') && <div className="typing"><i /><i /><i /></div>}
         {m.status === 'stopped' && <div className="note">Stopped.</div>}
-        {m.status === 'error' && <div className={`note error${m.refusal ? ' refusal' : ''}`}>{m.refusal ? <strong>Declined. </strong> : null}{m.error}</div>}
+        {m.status === 'error' && <div className={`note ${m.limited ? 'limited' : 'error'}`}>{m.refusal ? <strong>Declined. </strong> : null}{m.error}</div>}
       </div>
     </div>
   );

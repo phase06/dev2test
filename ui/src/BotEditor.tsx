@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Client, TEMPLATES, type Bot, type Conn, type Runtime, type UiConfig } from './api';
+import { Client, TEMPLATES, usd, type Bot, type Conn, type Runtime, type UiConfig } from './api';
 import { Avatar, Field, Icon } from './ui';
 
 const COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#8b5cf6', '#14b8a6'];
@@ -50,7 +50,7 @@ export function BotEditor({ rt, botId, others, onDone, onChat }: { rt: Runtime; 
   const saveBot = async () => {
     setErr('');
     try {
-      const body = { ...d, effort: d.effort ?? '' }; // '' tells the server to clear it
+      const body = { ...d, effort: d.effort ?? '', monthlyLimit: d.monthlyLimit ?? '' }; // '' tells the server to clear it
       const saved = existing ? await rt.client.put<Bot>(`/api/bots/${existing.id}`, body) : await rt.client.post<Bot>('/api/bots', body);
       if (existing && memory !== null) await rt.client.put(`/api/bots/${existing.id}/memory`, { text: memory });
       await rt.reload();
@@ -183,6 +183,23 @@ export function BotEditor({ rt, botId, others, onDone, onChat }: { rt: Runtime; 
         </div>
         {d.isolation === 'container' && !rt.info?.sandbox.available && <div className="note error">No container engine is running on {rt.info?.name}. Until Docker or Podman is started there, this teammate's commands will fail rather than run on the host.</div>}
         {d.isolation === 'host' && d.policy === 'auto' && <div className="note">Autonomous on the host: this teammate can run any command as your user without asking. Prefer a container, or a dedicated VM.</div>}
+      </section>
+
+      <section>
+        <h3>Spending</h3>
+        <div className="grid2">
+          <Field
+            label="Monthly limit (USD)"
+            hint={existing
+              ? rt.spend?.unpricedBots.includes(existing.id)
+                ? `No price is known for ${existing.model}, so its spending isn't counted and this limit can't apply. Add a price under Settings → the provider.`
+                : `Spent this month: ${usd(rt.spend?.bots[existing.id] ?? 0)}. At the limit, ${existing.name} stops and says why. Leave empty for no limit.`
+              : 'At the limit, this teammate stops and says why. Leave empty for no limit.'}
+          >
+            <input type="number" min={0} step={1} value={d.monthlyLimit ?? ''} placeholder="No limit"
+              onChange={(e) => set({ monthlyLimit: e.target.value === '' ? undefined : Number(e.target.value) })} />
+          </Field>
+        </div>
       </section>
 
       <section>

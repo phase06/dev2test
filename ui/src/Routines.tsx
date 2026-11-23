@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { Routine, Runtime } from './api';
+import { usd, type Routine, type Runtime } from './api';
 import { Avatar, Field, Icon, Modal, timeAgo } from './ui';
 
 const SCHEDULES: [string, string][] = [
@@ -18,8 +18,9 @@ function RoutineModal({ rt, initial, onClose }: { rt: Runtime; initial: Routine 
   const bot = rt.bots.find((b) => b.id === r.botId);
   const saveIt = async () => {
     try {
-      if (initial) await rt.client.put(`/api/routines/${initial.id}`, r);
-      else await rt.client.post('/api/routines', r);
+      const body = { ...r, monthlyLimit: r.monthlyLimit ?? '' }; // '' clears it
+      if (initial) await rt.client.put(`/api/routines/${initial.id}`, body);
+      else await rt.client.post('/api/routines', body);
       onClose();
     } catch (e: any) {
       setErr(e.message);
@@ -46,6 +47,10 @@ function RoutineModal({ rt, initial, onClose }: { rt: Runtime; initial: Routine 
           </select>
         </Field>
         {custom && <Field label="Cron (min hour day month weekday)"><input value={r.cron} onChange={(e) => setR({ ...r, cron: e.target.value })} placeholder="*/30 9-17 * * 1-5" /></Field>}
+        <Field label="Monthly limit (USD)" hint="Runs stop at this amount until next month. Counts toward the teammate's limit too.">
+          <input type="number" min={0} step={1} value={r.monthlyLimit ?? ''} placeholder="No limit"
+            onChange={(e) => setR({ ...r, monthlyLimit: e.target.value === '' ? undefined : Number(e.target.value) })} />
+        </Field>
       </div>
       {r.cron && bot?.policy === 'ask' && <div className="note">{bot.name} is set to “Ask first”, so scheduled runs will pause until you approve each action. Switch it to Autonomous for unattended runs.</div>}
       {err && <div className="note error">{err}</div>}
@@ -73,7 +78,7 @@ export function Routines({ rt, onOpenThread }: { rt: Runtime; onOpenThread: (id:
               <Avatar bot={bot} size={30} />
               <div>
                 <strong>{r.name}</strong>
-                <small>{bot?.name} · {describeCron(r.cron)}{r.enabled ? '' : ' · paused'} · last run {timeAgo(r.lastRun)}</small>
+                <small>{bot?.name} · {describeCron(r.cron)}{r.enabled ? '' : ' · paused'} · last run {timeAgo(r.lastRun)} · {usd(rt.spend?.routines[r.id] ?? 0)} this month{r.monthlyLimit ? ` of ${usd(r.monthlyLimit)}` : ''}</small>
               </div>
               {r.cron && <label className="check"><input type="checkbox" checked={r.enabled} onChange={(e) => rt.client.put(`/api/routines/${r.id}`, { enabled: e.target.checked })} /> On</label>}
               {r.threadId && <button className="btn sm" onClick={() => onOpenThread(r.threadId!)}>Runs</button>}
