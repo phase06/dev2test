@@ -42,6 +42,29 @@ Last reviewed: 2026-11-20.
       GitHub access refuses branch deletion; do it from the PR page or locally).
 - [ ] Consider enabling "Automatically delete head branches" in repo settings.
 
+## Next up (proposed 2026-11-23)
+
+- [x] Spending limits: runtime, teammate and routine monthly limits; cost per reply (branch `spending-limits`).
+- [x] Harden remote runtimes: tickets instead of the token in URLs, origin allowlist, built-in TLS
+      and no plain HTTP off loopback, `env:` key references, keys encrypted at rest on desktop.
+- [ ] Remaining: the runtime access token is plain text in config.json; one token, no users/roles;
+      no token rotation command.
+- [x] Prompt-injection defence: untrusted wrapping of web/browser/connector output, and approval for
+      acting after it (per conversation; per-teammate setting).
+- [ ] Remaining: content fetched via the shell (curl, git clone) or read from downloaded files isn't
+      marked untrusted; a summary of untrusted content loses the wrapper; unattended routines that read
+      the web will wait for approval unless the check is turned off for that teammate.
+- [x] Run history and settings change log (append-only monthly JSONL, History page, export).
+- [ ] Remaining: no retention policy (files grow until deleted by hand); not tamper-evident (no hash chain or signing).
+
+## Spending limits: known limits
+
+- [ ] Costs are estimates from reported tokens × prices; the built-in Claude table (2026-11) will drift.
+      Haiku 5.5's higher price above 100K-token prompts isn't modelled.
+- [ ] Calls from providers that report no usage are counted as "not metered" and escape the limits.
+- [ ] A fallback reply is priced at the model that produced the final message, though usage covers
+      every attempt.
+
 ## Harness gaps (not started)
 
 - [ ] Run independent tool calls in parallel (currently sequential).

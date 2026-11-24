@@ -24,6 +24,8 @@ function decide(body) {
     if (textOf(last).startsWith('Pause the task.')) return { text: `PROGRESS: completed ${done} steps of ${goal}.` };
     if (last.role === 'tool' || last.role === 'user') return done < goal ? call('shell', { command: `printf 'x%.0s' $(seq 1 2000); echo " step ${done + 1}"` }) : { text: `Finished all ${goal} steps.` };
   }
+  const fetchUrl = /fetch (https?:\/\/\S+)/.exec(textOf(last))?.[1];
+  if (fetchUrl && last.role === 'user' && has('web_fetch')) return call('web_fetch', { url: fetchUrl });
   if (q0(last).includes('look at') && has('read_file')) return call('read_file', { path: /look at (\S+)/.exec(textOf(last))[1] });
   if (last.role === 'user' && Array.isArray(last.content) && images.length) return { text: `I can see ${images.length} image(s).` };
   if (last.role === 'tool') return { text: `Done. Result:\n\n\`\`\`\n${String(last.content).slice(0, 200)}\n\`\`\`` };
@@ -54,6 +56,7 @@ export function startMock(port = 0) {
     req.on('end', async () => {
       const body = JSON.parse(data);
       server.requests.push(body);
+      server.headers.push(req.headers);
       const d = decide(body);
       if (d.status) {
         res.writeHead(d.status, { 'content-type': 'application/json' });
@@ -86,6 +89,7 @@ export function startMock(port = 0) {
     });
   });
   server.requests = [];
+  server.headers = [];
   return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve(server)));
 }
 

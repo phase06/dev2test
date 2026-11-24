@@ -34,6 +34,9 @@ starts one locally and can connect to any number of remote ones. A bot lives on 
 | Isolation | Per bot: **Own container** (Docker or Podman; only that bot's workspace is mounted) or **Host**. New bots default to a container when an engine is running. |
 | Connectors | Stdio MCP servers configured per runtime. |
 | Controls | Ask-first / Autonomous / Read-only per bot, inline approvals, Stop. |
+| Prompt-injection defence | Output from web fetch, the browser and MCP connectors reaches the model wrapped as `<untrusted>` data, with a standing rule never to follow instructions in it. Once a conversation contains such content, commands, file changes, connector calls, memory writes, routines and delegation need approval even for autonomous teammates ("Allow for this conversation" or a per-teammate setting turns it off). Content fetched by other means, such as `curl` in the shell, isn't detected. |
+| History | Every run (who, where, what started it, outcome, each tool call and approval decision, cost) and every settings change (which fields; old and new values only for autonomy, isolation, limits, model and similar, never API keys or instructions) go to append-only monthly files in `history/`. The History page reads them and exports a month. |
+| Spending limits | Each reply shows its cost. Monthly USD limits for the whole runtime (Settings → Spending), each teammate (profile) and each routine; checked before every model call, so a run stops at most one call past the limit and says why. Claude prices are built in; other models need a price per model on their provider, and are listed as "not counted" until they have one. |
 
 ### Container isolation
 
@@ -67,8 +70,31 @@ ssh -N -L 4781:127.0.0.1:4780 user@vm          # on your machine
 ```
 
 In the app: **Settings → Connect remote** and paste `http://127.0.0.1:4781/#token=…`.
-`deploy/` has a systemd unit and a Dockerfile. The runtime speaks plain HTTP: use an SSH tunnel, VPN
-or a TLS reverse proxy — don't expose `--host 0.0.0.0` to the internet.
+`deploy/` has a systemd unit and a Dockerfile.
+
+**Exposing it directly.** The runtime refuses plain HTTP on a non-loopback address. Either serve HTTPS
+itself, or terminate TLS in front of it:
+
+```bash
+node crew-runtime.mjs --host 0.0.0.0 --tls-cert /etc/crew/cert.pem --tls-key /etc/crew/key.pem
+node crew-runtime.mjs --host 127.0.0.1 --allow-insecure-http   # only behind a TLS reverse proxy on the same host
+```
+
+What protects a runtime:
+
+- **One access token**, accepted only in the `Authorization` header — never in a URL, where it would
+  land in logs and browser history. The "Open:" link carries it in the `#fragment`, which browsers
+  don't send. Image and file links and the live event stream use 15-minute, read-only **tickets**
+  signed per process (a restart invalidates them).
+- **Origin allowlist.** Browsers may call the API only from the runtime's own origin, loopback (the
+  desktop app), or origins added with `--allow-origin` / `CREW_ALLOWED_ORIGINS`. Others get a 403.
+- **Provider API keys** never leave the runtime. Enter `env:VAR_NAME` instead of a key to read it from
+  the runtime's environment (a systemd `EnvironmentFile`, a container secret) so it is never written
+  to disk. The desktop app encrypts keys in `config.json` with a key held in the OS keychain; on Linux
+  this needs a real keyring (libsecret/kwallet), otherwise keys stay in plain text, file mode 0600.
+
+Not covered: the access token itself is stored in plain text in `config.json` (mode 0600), and there
+is one token per runtime, with no separate users or roles.
 
 ## Tests
 

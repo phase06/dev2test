@@ -1,6 +1,8 @@
 import templates from './templates.json';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Bot, Config, Connection, Routine, RuntimeInfo, ServerEvent, StatusSnapshot, Thread } from '../../runtime/src/types';
+import type { Bot, Config, Connection, Ledger, Routine, RuntimeInfo, ServerEvent, StatusSnapshot, Thread } from '../../runtime/src/types';
+
+export type Spend = Ledger & { monthlyLimit?: number; unpricedBots: string[] };
 
 export type * from '../../runtime/src/types';
 export type Conn = Connection;
@@ -30,13 +32,59 @@ export class Client {
   post = <T = any>(p: string, b: unknown = {}) => this.req<T>('POST', p, b);
   put = <T = any>(p: string, b: unknown) => this.req<T>('PUT', p, b);
   del = <T = any>(p: string) => this.req<T>('DELETE', p);
-  events(cb: (e: ServerEvent) => void) {
-    const es = new EventSource(`${this.base}/api/events?token=${encodeURIComponent(this.conn.token)}`);
-    es.onmessage = (e) => cb(JSON.parse(e.data));
-    return es;
+  /** A file's text, fetched with the token in a header. */
+  async text(path: string): Promise<string | null> {
+    const r = await fetch(this.base + path, { headers: { Authorization: `Bearer ${this.conn.token}` } }).catch(() => null);
+    return r?.ok ? r.text() : null;
   }
+
+  // The access token never goes in a URL (URLs end up in logs and history). The two places a
+  // browser can't send a header (EventSource and <img>/<a> links) use a short-lived read-only ticket.
+  private ticket: { value: string; expires: number } | null = null;
+  async freshTicket(): Promise<string> {
+    if (!this.ticket || this.ticket.expires - Date.now() < 5 * 60_000) {
+      const t = await this.post<{ ticket: string; expires: number }>('/api/ticket');
+      this.ticket = { value: t.ticket, expires: t.expires };
+    }
+    return this.ticket.value;
+  }
+
+  /** Live events. Reconnects with a fresh ticket when the connection drops. */
+  events(cb: (e: ServerEvent) => void, onState: (up: boolean) => void) {
+    let es: EventSource | undefined;
+    let closed = false;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const again = () => {
+      if (!closed) retry = setTimeout(open, 3000);
+    };
+    const open = async () => {
+      try {
+        const t = await this.freshTicket();
+        if (closed) return;
+        es = new EventSource(`${this.base}/api/events?ticket=${encodeURIComponent(t)}`);
+        es.onmessage = (e) => cb(JSON.parse(e.data));
+        es.onopen = () => onState(true);
+        es.onerror = () => {
+          onState(false);
+          // CLOSED means the browser gave up (e.g. the ticket expired): reconnect with a new one.
+          if (es?.readyState === EventSource.CLOSED) again();
+        };
+      } catch {
+        onState(false);
+        again();
+      }
+    };
+    void open();
+    return () => {
+      closed = true;
+      clearTimeout(retry);
+      es?.close();
+    };
+  }
+
   fileUrl(botId: string, path: string) {
-    return `${this.base}/api/bots/${botId}/file?path=${encodeURIComponent(path)}&token=${encodeURIComponent(this.conn.token)}`;
+    const t = this.ticket ? `&ticket=${encodeURIComponent(this.ticket.value)}` : '';
+    return `${this.base}/api/bots/${botId}/file?path=${encodeURIComponent(path)}${t}`;
   }
 }
 
@@ -51,6 +99,7 @@ export interface Runtime {
   bots: Bot[];
   threads: Thread[];
   routines: Routine[];
+  spend: Spend | null;
   status: StatusSnapshot;
   reload: () => Promise<void>;
   subscribe: (fn: (e: ServerEvent) => void) => () => void;
@@ -65,6 +114,8 @@ const empty = {
   bots: [] as Bot[],
   threads: [] as Thread[],
   routines: [] as Routine[],
+  spend: null as Spend | null,
+  ticketAt: 0,
   status: { bots: {}, threads: [] } as StatusSnapshot,
 };
 
@@ -78,14 +129,16 @@ export function useRuntime(conn: Conn): Runtime {
 
   const reload = useCallback(async () => {
     try {
-      const [info, config, bots, threads, routines] = await Promise.all([
+      const [info, config, bots, threads, routines, spend] = await Promise.all([
         client.get<RuntimeInfo>('/api/info'),
         client.get<UiConfig>('/api/config'),
         client.get<Bot[]>('/api/bots'),
         client.get<Thread[]>('/api/threads'),
         client.get<Routine[]>('/api/routines'),
+        client.get<Spend>('/api/spend'),
+        client.freshTicket(),
       ]);
-      if (alive.current === client) setState((s) => ({ ...s, loading: false, online: true, error: '', info, config, bots, threads, routines }));
+      if (alive.current === client) setState((s) => ({ ...s, loading: false, online: true, error: '', info, config, bots, threads, routines, spend }));
     } catch (e: any) {
       if (alive.current === client) setState((s) => ({ ...s, loading: false, online: false, error: e.message }));
     }
@@ -94,21 +147,32 @@ export function useRuntime(conn: Conn): Runtime {
   useEffect(() => {
     setState(empty);
     void reload();
-    const es = client.events((e) => {
-      if (e.type === 'status') setState((s) => ({ ...s, status: e.status }));
+    // Keep file-link tickets fresh; the state change re-renders images with the new ticket.
+    const tick = setInterval(() => {
+      client.freshTicket().then(() => alive.current === client && setState((s) => ({ ...s, ticketAt: Date.now() })), () => {});
+    }, 60_000);
+    let wasDown = false;
+    const stop = client.events((e) => {
+      if (e.type === 'status') {
+        setState((s) => ({ ...s, status: e.status }));
+        // Runs starting and finishing are when spending changes; cheap enough to refetch then.
+        client.get<Spend>('/api/spend').then((spend) => alive.current === client && setState((s) => ({ ...s, spend })), () => {});
+      }
       else if (e.type === 'changed') void reload();
       subs.current.forEach((f) => f(e));
+    }, (up) => {
+      if (up) {
+        if (wasDown) void reload();
+        wasDown = false;
+      } else {
+        wasDown = true;
+        setState((s) => ({ ...s, online: false, error: s.error || `Lost connection to ${client.conn.url}` }));
+      }
     });
-    let wasDown = false;
-    es.onerror = () => {
-      wasDown = true;
-      setState((s) => ({ ...s, online: false, error: s.error || `Lost connection to ${client.conn.url}` }));
+    return () => {
+      stop();
+      clearInterval(tick);
     };
-    es.onopen = () => {
-      if (wasDown) void reload();
-      wasDown = false;
-    };
-    return () => es.close();
   }, [client, reload]);
 
   const subscribe = useCallback((fn: (e: ServerEvent) => void) => {
@@ -132,3 +196,5 @@ export const PRESETS: { label: string; kind: 'openai' | 'anthropic'; baseUrl: st
 
 // Shared with the eval suite (eval/solo), so evaluated teammates match what users get.
 export const TEMPLATES: { name: string; role: string; instructions: string; tools?: Partial<Bot['tools']> }[] = templates;
+
+export const usd = (n: number) => (n === 0 ? '$0' : n < 0.01 ? '<$0.01' : n < 100 ? `$${n.toFixed(2)}` : `$${Math.round(n).toLocaleString()}`);

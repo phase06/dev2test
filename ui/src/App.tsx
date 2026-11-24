@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Client, useRuntime, type Bot, type Conn, type Runtime, type Thread, type UiConfig } from './api';
+import { Client, usd, useRuntime, type Bot, type Conn, type Runtime, type Thread, type UiConfig } from './api';
 import { Chat } from './Chat';
 import { BotEditor } from './BotEditor';
 import { Settings } from './Settings';
 import { Routines } from './Routines';
+import { History } from './History';
 import { Avatar, Field, Icon, Modal } from './ui';
 
-type View = { type: 'home' } | { type: 'thread'; id: string } | { type: 'bot'; id: string | null } | { type: 'routines' } | { type: 'settings' };
+type View = { type: 'home' } | { type: 'thread'; id: string } | { type: 'bot'; id: string | null } | { type: 'routines' } | { type: 'history' } | { type: 'settings' };
 
 const ls = {
   get: (k: string) => { try { return localStorage.getItem(k); } catch { return null; } },
@@ -132,6 +133,7 @@ function Shell({ token, onBadToken }: { token: string; onBadToken: () => void })
         <nav className="side-nav">
           <button className={view.type === 'home' ? 'on' : ''} onClick={() => setView({ type: 'home' })}><Icon name="users" /> Team{waiting > 0 && <b>{waiting}</b>}</button>
           <button className={view.type === 'routines' ? 'on' : ''} onClick={() => setView({ type: 'routines' })}><Icon name="clock" /> Routines</button>
+          <button className={view.type === 'history' ? 'on' : ''} onClick={() => setView({ type: 'history' })}><Icon name="list" /> History</button>
           <button className={view.type === 'settings' ? 'on' : ''} onClick={() => setView({ type: 'settings' })}><Icon name="gear" /> Settings</button>
         </nav>
       </aside>
@@ -141,6 +143,7 @@ function Shell({ token, onBadToken }: { token: string; onBadToken: () => void })
         {view.type === 'thread' && thread ? <Chat rt={rt} thread={thread} onEditBot={(id) => setView({ type: 'bot', id })} />
           : view.type === 'bot' ? <BotEditor rt={rt} botId={view.id} others={conns.filter((c) => c.id !== conn.id)} onDone={() => setView({ type: 'home' })} onChat={(b) => void openDm(b)} />
           : view.type === 'routines' ? <Routines rt={rt} onOpenThread={async (id) => { await rt.reload(); setView({ type: 'thread', id }); }} />
+          : view.type === 'history' ? <History rt={rt} onOpenThread={(id) => setView({ type: 'thread', id })} />
           : view.type === 'settings' ? <Settings rt={rt} remotes={remotes} saveRemotes={saveRemotes} homeId="home" />
           : <Home rt={rt} go={setView} openDm={openDm} />}
       </main>
@@ -201,6 +204,10 @@ function Home({ rt, go, openDm }: { rt: Runtime; go: (v: View) => void; openDm: 
                 <dt>Model</dt><dd>{prov ? `${b.model || '—'} · ${prov.name}` : 'No provider'}</dd>
                 <dt>Autonomy</dt><dd>{{ ask: 'Asks first', auto: 'Autonomous', readonly: 'Read-only' }[b.policy]}</dd>
                 <dt>Runs in</dt><dd>{b.isolation === 'container' ? 'Own container' : 'Host'}</dd>
+                <dt>This month</dt>
+                <dd className={b.monthlyLimit && (rt.spend?.bots[b.id] ?? 0) >= b.monthlyLimit * 0.8 ? 'approval' : ''}>
+                  {rt.spend?.unpricedBots.includes(b.id) ? 'Not tracked (no price for this model)' : `${usd(rt.spend?.bots[b.id] ?? 0)}${b.monthlyLimit ? ` of ${usd(b.monthlyLimit)}` : ''}`}
+                </dd>
               </dl>
               <div className="card-actions"><button className="btn primary sm" onClick={() => openDm(b)}>Message</button><button className="btn sm" onClick={() => go({ type: 'bot', id: b.id })}>Profile</button></div>
             </div>

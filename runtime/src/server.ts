@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -7,6 +8,16 @@ import { fileURLToPath } from 'node:url';
 import type { Bot, Provider, Routine, RuntimeInfo, Thread } from './types';
 import { HOME, db, dropMessages, emit, messages, newId, safePath, save, setTeamMemory, subscribe, teamMemory, wsDir } from './store';
 import { detectEngine, removeContainer, sandboxInfo } from './sandbox';
+import { BUILTIN_PRICES, ledger, priceFor } from './pricing';
+import { isEnvRef } from './secrets';
+import { botFields, diff, exportPath, query, record } from './history';
+
+const logChange = (action: string, target: string | undefined, fields: Record<string, unknown>) => {
+  if (Object.keys(fields).length || action.endsWith('.create') || action.endsWith('.delete')) record({ type: 'change', ts: Date.now(), action, target, fields });
+};
+
+/** A spending limit from the UI: a positive number of USD, or '' / 0 / null to remove it. */
+const limitFrom = (v: unknown, old?: number) => (v === undefined ? old : Number(v) > 0 ? Math.round(Number(v) * 100) / 100 : undefined);
 import { postMessage, resolveApproval, runRoutine, snapshot, stopThread } from './agent';
 import { chat, listModels } from './providers';
 import { mcpClients, syncMcp } from './mcp';
@@ -66,6 +77,8 @@ function botFrom(body: any, old?: Bot): Bot {
     policy: ['auto', 'ask', 'readonly'].includes(body.policy) ? body.policy : old?.policy || 'ask',
     // '' clears the setting back to the model's default
     effort: body.effort === '' ? undefined : EFFORTS.includes(body.effort) ? body.effort : old?.effort,
+    monthlyLimit: limitFrom(body.monthlyLimit, old?.monthlyLimit),
+    guard: typeof body.guard === 'boolean' ? body.guard : old?.guard ?? true,
     isolation: ['host', 'container'].includes(body.isolation) ? body.isolation : old?.isolation || (sandboxInfo().available ? 'container' : 'host'),
     tools: { shell: true, files: true, web: true, browser: false, mcp: true, team: true, teamMemory: false, ...(old?.tools || {}), ...(body.tools || {}) },
     createdAt: old?.createdAt || Date.now(),
@@ -75,6 +88,10 @@ function botFrom(body: any, old?: Bot): Bot {
 const changed = (what: 'bots' | 'threads' | 'routines' | 'config') => emit({ type: 'changed', what });
 
 // ---- Runtime ----
+// Short-lived, read-only tickets for the two URLs a browser can't attach a header to: the event
+// stream (EventSource) and workspace files shown as <img>/<a>. The real token stays in headers.
+on('POST', '/api/ticket', () => issueTicket());
+
 on('GET', '/api/info', async (): Promise<RuntimeInfo> => (await detectEngine(), {
   name: db.config.name,
   version: VERSION,
@@ -88,20 +105,56 @@ on('GET', '/api/status', () => snapshot());
 
 on('GET', '/api/config', () => ({
   name: db.config.name,
-  providers: db.config.providers.map(({ apiKey, ...p }) => ({ ...p, apiKey: '', hasKey: !!apiKey })),
+  // Keys never leave the runtime; an env: reference is not a secret, so it is shown.
+  providers: db.config.providers.map(({ apiKey, ...p }) => ({ ...p, apiKey: isEnvRef(apiKey) ? apiKey : '', hasKey: !!apiKey })),
   mcpServers: db.config.mcpServers,
   connections: db.config.connections,
   sandbox: db.config.sandbox,
   contextTokens: db.config.contextTokens,
+  monthlyLimit: db.config.monthlyLimit,
+  allowedOrigins: db.config.allowedOrigins,
 }));
+// Spending this month, plus which teammates' models have no price (so their spending can't be limited).
+on('GET', '/api/spend', () => {
+  const l = ledger();
+  const unpricedBots = db.bots
+    .filter((b) => !priceFor(db.config.providers.find((p) => p.id === b.providerId), b.model))
+    .map((b) => b.id);
+  return { ...l, monthlyLimit: db.config.monthlyLimit, unpricedBots };
+});
+on('GET', '/api/prices', () => BUILTIN_PRICES);
+on('GET', '/api/history', ({ url }) => {
+  const type = url.searchParams.get('type');
+  return query({
+    type: type === 'run' || type === 'change' ? type : undefined,
+    botId: url.searchParams.get('bot') || undefined,
+    before: Number(url.searchParams.get('before')) || undefined,
+    limit: Math.min(Math.max(Number(url.searchParams.get('limit')) || 100, 1), 1000),
+  });
+});
+on('GET', '/api/history/:month', ({ params, res }) => {
+  const f = exportPath(params[0]);
+  if (!f) throw new HttpError(404, 'No history for that month');
+  res.writeHead(200, { 'content-type': 'application/x-ndjson', 'content-disposition': `attachment; filename="crew-history-${params[0]}.jsonl"` });
+  fs.createReadStream(f).pipe(res);
+  return undefined;
+});
 on('GET', '/api/team-memory', () => ({ text: teamMemory() }));
-on('PUT', '/api/team-memory', ({ body }) => (setTeamMemory(String(body.text ?? '')), { ok: true }));
+on('PUT', '/api/team-memory', ({ body }) => {
+  setTeamMemory(String(body.text ?? ''));
+  logChange('team-memory.update', undefined, { text: 'changed' });
+  return { ok: true };
+});
 on('PUT', '/api/config', async ({ body }) => {
+  const before = JSON.parse(JSON.stringify({ ...db.config, token: undefined }));
   if (typeof body.name === 'string' && body.name.trim()) db.config.name = body.name.trim();
   if (Array.isArray(body.providers))
     db.config.providers = body.providers.map((p: Provider) => ({ ...withKey(p), id: p.id || newId('prov') }));
   if (Array.isArray(body.connections)) db.config.connections = body.connections;
   if (Number(body.contextTokens) >= 100) db.config.contextTokens = Math.round(Number(body.contextTokens));
+  if ('monthlyLimit' in body) db.config.monthlyLimit = limitFrom(body.monthlyLimit);
+  if (Array.isArray(body.allowedOrigins))
+    db.config.allowedOrigins = body.allowedOrigins.map((o: unknown) => String(o).trim().replace(/\/+$/, '')).filter((o: string) => /^https?:\/\/[^/]+$/.test(o));
   if (body.sandbox && typeof body.sandbox === 'object')
     db.config.sandbox = {
       image: String(body.sandbox.image || '').trim() || db.config.sandbox.image,
@@ -114,6 +167,21 @@ on('PUT', '/api/config', async ({ body }) => {
   }
   save('config');
   changed('config');
+  // Providers: log names and whether a key changed, never the key.
+  const fields = diff(before, db.config, Object.keys(body).filter((k) => k !== 'providers' && k !== 'connections'));
+  if (Array.isArray(body.providers)) {
+    const was = new Map<string, Provider>(before.providers.map((p: Provider) => [p.id, p]));
+    const now = new Map(db.config.providers.map((p) => [p.id, p]));
+    const added = [...now.values()].filter((p) => !was.has(p.id)).map((p) => p.name);
+    const removed = [...was.values()].filter((p) => !now.has(p.id)).map((p) => p.name);
+    const keyChanged = [...now.values()].filter((p) => was.has(p.id) && was.get(p.id)!.apiKey !== p.apiKey).map((p) => p.name);
+    const edited = [...now.values()].filter((p) => was.has(p.id) && JSON.stringify({ ...was.get(p.id), apiKey: 0 }) !== JSON.stringify({ ...p, apiKey: 0 })).map((p) => p.name);
+    if (added.length) fields.providersAdded = added;
+    if (removed.length) fields.providersRemoved = removed;
+    if (edited.length) fields.providersEdited = edited;
+    if (keyChanged.length) fields.apiKeyChanged = keyChanged;
+  }
+  logChange('config.update', db.config.name, fields);
   return { ok: true };
 });
 on('POST', '/api/providers/models', async ({ body }) => ({ models: await listModels(withKey(body.provider)) }));
@@ -129,6 +197,7 @@ on('GET', '/api/bots', () => db.bots);
 on('POST', '/api/bots', ({ body }) => {
   const bot = botFrom(body);
   db.bots.push(bot);
+  logChange('bot.create', bot.name, botFields(undefined, bot));
   wsDir(bot.id);
   save('bots');
   changed('bots');
@@ -137,7 +206,9 @@ on('POST', '/api/bots', ({ body }) => {
 on('PUT', '/api/bots/:id', ({ params, body }) => {
   const i = db.bots.findIndex((b) => b.id === params[0]);
   if (i < 0) throw new HttpError(404, 'Bot not found');
-  db.bots[i] = botFrom(body, db.bots[i]);
+  const was = db.bots[i];
+  db.bots[i] = botFrom(body, was);
+  logChange('bot.update', db.bots[i].name, botFields(was, db.bots[i]));
   if (db.bots[i].isolation !== 'container') void removeContainer(db.bots[i].id);
   save('bots');
   changed('bots');
@@ -145,6 +216,7 @@ on('PUT', '/api/bots/:id', ({ params, body }) => {
 });
 on('DELETE', '/api/bots/:id', async ({ params }) => {
   const id = params[0];
+  logChange('bot.delete', db.bots.find((b) => b.id === id)?.name, {});
   await removeContainer(id);
   db.bots = db.bots.filter((b) => b.id !== id);
   for (const t of db.threads.filter((t) => t.members.includes(id))) {
@@ -221,7 +293,10 @@ on('POST', '/api/threads/:id/messages', ({ params, body }) => {
   return postMessage(thread(params[0]), { type: 'user', name: 'You' }, text);
 });
 on('POST', '/api/threads/:id/stop', ({ params }) => (stopThread(params[0]), { ok: true }));
-on('POST', '/api/approvals/:id', ({ params, body }) => ({ ok: resolveApproval(params[0], body.decision) }));
+on('POST', '/api/approvals/:id', ({ params, body }) => {
+  if (!['approve', 'deny', 'always', 'conversation'].includes(body.decision)) throw new HttpError(400, 'Unknown decision');
+  return { ok: resolveApproval(params[0], body.decision) };
+});
 
 // ---- Routines ----
 on('GET', '/api/routines', () => db.routines);
@@ -234,10 +309,12 @@ const routineFrom = (body: any, old?: Routine): Routine => ({
   enabled: body.enabled ?? old?.enabled ?? true,
   threadId: old?.botId === (body.botId ?? old?.botId) ? old?.threadId : undefined,
   lastRun: old?.lastRun,
+  monthlyLimit: limitFrom(body.monthlyLimit, old?.monthlyLimit),
 });
 on('POST', '/api/routines', ({ body }) => {
   const r = routineFrom(body);
   db.routines.push(r);
+  logChange('routine.create', r.name, diff(undefined, r, ['name', 'botId', 'cron', 'enabled', 'monthlyLimit']));
   save('routines');
   changed('routines');
   return r;
@@ -245,12 +322,15 @@ on('POST', '/api/routines', ({ body }) => {
 on('PUT', '/api/routines/:id', ({ params, body }) => {
   const i = db.routines.findIndex((r) => r.id === params[0]);
   if (i < 0) throw new HttpError(404, 'Routine not found');
-  db.routines[i] = routineFrom(body, db.routines[i]);
+  const was = db.routines[i];
+  db.routines[i] = routineFrom(body, was);
+  logChange('routine.update', db.routines[i].name, diff(was, db.routines[i], ['name', 'botId', 'prompt', 'cron', 'enabled', 'monthlyLimit']));
   save('routines');
   changed('routines');
   return db.routines[i];
 });
 on('DELETE', '/api/routines/:id', ({ params }) => {
+  logChange('routine.delete', db.routines.find((r) => r.id === params[0])?.name, {});
   db.routines = db.routines.filter((r) => r.id !== params[0]);
   save('routines');
   changed('routines');
@@ -261,11 +341,40 @@ on('POST', '/api/routines/:id/run', ({ params }) => ({
 }));
 
 // ---- HTTP plumbing ----
+const sameSecret = (given: string, real: string) =>
+  crypto.timingSafeEqual(crypto.createHash('sha256').update(given).digest(), crypto.createHash('sha256').update(real).digest());
+
+const TICKET_SECRET = crypto.randomBytes(32); // per process: tickets die with a restart
+const TICKET_TTL = 15 * 60 * 1000;
+const TICKET_PATHS = /^\/api\/(events|bots\/[^/]+\/file)$/;
+const sign = (exp: string) => crypto.createHmac('sha256', TICKET_SECRET).update(exp).digest('base64url');
+export function issueTicket() {
+  const expires = Date.now() + TICKET_TTL;
+  return { ticket: `${expires}.${sign(String(expires))}`, expires };
+}
+function ticketValid(t: string | null) {
+  const [exp, mac] = (t ?? '').split('.');
+  return !!exp && !!mac && Number(exp) > Date.now() && sameSecret(mac, sign(exp));
+}
+
+/** The bearer token in the Authorization header, or a ticket for one of the read-only ticket URLs. */
 function authed(req: http.IncomingMessage, url: URL) {
-  const given = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || url.searchParams.get('token') || '';
-  const a = crypto.createHash('sha256').update(given).digest();
-  const b = crypto.createHash('sha256').update(db.config.token).digest();
-  return crypto.timingSafeEqual(a, b);
+  const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (bearer) return sameSecret(bearer, db.config.token);
+  return req.method === 'GET' && TICKET_PATHS.test(url.pathname) && ticketValid(url.searchParams.get('ticket'));
+}
+
+const LOOPBACK = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/;
+/** Browser origins allowed to call the API: this runtime's own, loopback (the desktop app), and configured ones. */
+function originAllowed(origin: string, host: string | undefined) {
+  if (LOOPBACK.test(origin)) return true;
+  try {
+    if (host && new URL(origin).host === host) return true;
+  } catch {
+    return false;
+  }
+  const extra = [...db.config.allowedOrigins, ...(process.env.CREW_ALLOWED_ORIGINS ?? '').split(',')].map((o) => o.trim().replace(/\/+$/, '')).filter(Boolean);
+  return extra.includes(origin);
 }
 
 function readBody(req: http.IncomingMessage): Promise<any> {
@@ -297,16 +406,32 @@ function serveStatic(url: URL, res: http.ServerResponse) {
   fs.createReadStream(f).pipe(res);
 }
 
-export function createServer() {
-  return http.createServer(async (req, res) => {
+export function createServer(tls?: { cert: Buffer; key: Buffer }) {
+  return tls ? https.createServer(tls, handle) : http.createServer(handle);
+}
+
+async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     const url = new URL(req.url || '/', 'http://x');
-    // Auth is a bearer token (never cookies), so any origin may call the API: this is what lets a
-    // desktop app served from the local runtime talk to runtimes on other machines.
-    res.setHeader('access-control-allow-origin', '*');
-    res.setHeader('access-control-allow-headers', 'authorization, content-type');
-    res.setHeader('access-control-allow-methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('x-content-type-options', 'nosniff');
+    res.setHeader('referrer-policy', 'no-referrer');
+    if (!url.pathname.startsWith('/api/')) {
+      res.setHeader('x-frame-options', 'DENY');
+      return serveStatic(url, res);
+    }
+    // CORS: only allowed origins get the headers a browser needs to read responses, and requests
+    // from any other origin are refused outright (non-browser clients send no Origin and are unaffected).
+    const origin = req.headers.origin;
+    if (origin) {
+      if (!originAllowed(origin, req.headers.host)) {
+        res.writeHead(403, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ error: `Origin ${origin} is not allowed. Add it with --allow-origin or CREW_ALLOWED_ORIGINS.` }));
+      }
+      res.setHeader('access-control-allow-origin', origin);
+      res.setHeader('vary', 'Origin');
+      res.setHeader('access-control-allow-headers', 'authorization, content-type');
+      res.setHeader('access-control-allow-methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    }
     if (req.method === 'OPTIONS') return res.writeHead(204).end();
-    if (!url.pathname.startsWith('/api/')) return serveStatic(url, res);
 
     const json = (status: number, data: unknown) => {
       res.writeHead(status, { 'content-type': 'application/json' });
@@ -337,5 +462,4 @@ export function createServer() {
     } catch (e: any) {
       if (!res.headersSent) json(e instanceof HttpError ? e.status : 500, { error: e?.message || String(e) });
     }
-  });
 }
